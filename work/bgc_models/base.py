@@ -50,7 +50,9 @@ class BaseBGCModel(ABC):
     def sinking_step(self, dz, dt):
         for name, speed in self.sinking_config.items():
             if name in self.tracers:
-                self.tracers[name] = apply_sinking(
+                # We use [:] to ensure we are updating the existing array 
+                # memory rather than replacing the object reference.
+                self.tracers[name][:] = apply_sinking(
                     self.tracers[name], 
                     dz, 
                     dt, 
