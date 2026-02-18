@@ -94,7 +94,7 @@ class Model_NPZD(BaseBGCModel):
                     
                     # --- D. SOURCES / SINKS ---
                     # Realized Growth Rate
-                    lim_tem = np.exp(-p_act/p_gas*(1.0/(temp_cell+298.0)-1.0/(p_ref+298.0)))
+                    lim_tem = np.exp(-p_act/p_gas*(1.0/(temp_cell+273.15)-1.0/(p_ref+273.15)))
                     lim_lig = 1.0 - np.exp(-p_ini*p_the*par_cell/p_gro/lim_tem)
                     r_gro = p_gro * nitrate_cell / (
                         nitrate_cell + p_upt/p_aff + 
@@ -103,7 +103,6 @@ class Model_NPZD(BaseBGCModel):
                     r_pre = p_res * phy_cell
                     r_pmo = p_pmo * phy_cell * phy_cell
                     r_pex = p_exc * r_gro
-                    # check with sasai-san but i think Z in A6 is a typo?
                     r_gra = p_gra * (1.0 - np.exp(p_ivl*(p_p2z-phy_cell))) * zoo_cell
                     r_zmo = p_zmo * zoo_cell * zoo_cell
                     r_dec = p_dec * det_cell
