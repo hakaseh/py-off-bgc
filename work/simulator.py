@@ -7,13 +7,24 @@ import physics
 from bgc_models.utils import GLODAP_MAP
 
 class OfflineSimulator:
-    def __init__(self, da_t, bgc_model, model_name, exp_name, dt_phys, ds_clim=None,
-                 mixing_method="diffusion", 
-                 mld_threshold=0.03,
-                 sponge_width=5, tau_lateral=432000.0, tau_bottom=5184000.0):
+    def __init__(self, 
+                 da_t, 
+                 bgc_model, 
+                 model_name, 
+                 exp_name, 
+                 extra_name = "default", 
+                 dt_phys, 
+                 ds_clim = None,
+                 mixing_method = "diffusion", 
+                 mld_threshold = 0.03,
+                 sponge_width = 5, 
+                 tau_lateral=432000.0, 
+                 tau_bottom=5184000.0
+                ):
         self.bgc_model = bgc_model
         self.model_name = model_name
         self.exp_name = exp_name
+        self.extra_name = extra_name
         self.dt_phys = dt_phys
         self.steps_per_day = int(86400 / self.dt_phys)        
         self.ds_clim = ds_clim
@@ -75,7 +86,7 @@ class OfflineSimulator:
 
     def setup_io(self, da_ref):
         self.ds_template = da_ref.isel(time=0).drop_vars('time')
-        self.out_dir = f"../output/{self.exp_name}"
+        self.out_dir = f"../output/{self.model_name}_{self.exp_name}_{self.extra_name}"
         os.makedirs(self.out_dir, exist_ok=True)
         
     def run(self, da_u, da_v, da_k, da_t, da_s, da_sw): 
@@ -162,7 +173,7 @@ class OfflineSimulator:
         ds_out = ds_out.expand_dims(time=[current_time])
         
         t_str = pd.to_datetime(current_time).strftime('%Y%m%d')
-        fname = f"{self.out_dir}/output_{self.model_name}_{self.exp_name}_{t_str}.nc"
+        fname = f"{self.out_dir}/output_{self.model_name}_{self.exp_name}_{self.exp_name}_{t_str}.nc"
         
         if os.path.exists(fname):
             try:
