@@ -16,7 +16,7 @@ class Model_NPZD(BaseBGCModel):
         # If user gave nothing, create the default object. 
         # If user gave something, use it.
         if params is None:
-            self.params = Params_NPZD()
+            self.params = Params_BGC()
         else:
             self.params = params
 
@@ -42,16 +42,16 @@ class Model_NPZD(BaseBGCModel):
          self.tracers['zoo'], 
          self.tracers['det'], 
          self.tracers['oxygen']) = self._run_kernel(
-             self.tracers['nitrate'], 
-             self.tracers['phy'], 
-             self.tracers['zoo'], 
-             self.tracers['det'],
-             self.tracers['oxygen'],
-             t_curr, par_3d, dz, dt,
-             # Parameters (Explicitly passed)
-             p.p_res, p.p_pmo, p.p_exc, p.p_gra, p.p_ivl, p.p_p2z,
-             p.p_aef, p.p_gef, p.p_zmo, p.p_dec, p.p_gro, p.p_upt,
-             p.p_aff, p.p_ini, p.p_the, p.p_act, p.p_gas, p.p_ref, p.p_sin
+            self.tracers['nitrate'], 
+            self.tracers['phy'], 
+            self.tracers['zoo'], 
+            self.tracers['det'],
+            self.tracers['oxygen'],
+            t_curr, par_3d, dz, dt,
+            # Parameters (Explicitly passed)
+            p.p_res, p.p_pmo, p.p_exc, p.p_gra, p.p_ivl, p.p_p2z,
+            p.p_aef, p.p_gef, p.p_zmo, p.p_dec, p.p_gro, p.p_upt,
+            p.p_aff, p.p_ini, p.p_the, p.p_act, p.p_gas, p.p_ref, p.p_sin
          )
         return par_3d
     
@@ -128,7 +128,7 @@ class Model_NPZD(BaseBGCModel):
 
 
 @dataclass
-class Params_NPZD:
+class Params_BGC:
     """
     Configuration object for NPZD Model.
     Default values from Sasai et al 2022.
@@ -152,4 +152,3 @@ class Params_NPZD:
     p_gas: float = 8.3145 # gas constant
     p_ref: float = 20 # reference temperature (degC)
     p_sin: float = 30 # detritus sinking speed (m/d)
-
