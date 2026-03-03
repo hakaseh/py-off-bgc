@@ -12,15 +12,17 @@ class OfflineSimulator:
                  bgc_model, 
                  model_name, 
                  exp_name, 
-                 extra_name = "default", 
+                 extra_name, 
                  dt_phys, 
                  ds_clim = None,
                  mixing_method = "diffusion", 
                  mld_threshold = 0.03,
                  sponge_width = 5, 
                  tau_lateral=432000.0, 
-                 tau_bottom=5184000.0
+                 tau_bottom=5184000.0,
+                 is_global = False
                 ):
+        
         self.bgc_model = bgc_model
         self.model_name = model_name
         self.exp_name = exp_name
@@ -30,13 +32,12 @@ class OfflineSimulator:
         self.ds_clim = ds_clim
         self.mixing_method = mixing_method 
         self.mld_threshold = mld_threshold
+        self.is_global = is_global
         
         self.setup_grid(da_t, sponge_width, tau_lateral, tau_bottom)
         self.setup_io(da_t)
         self.setup_restoring()
         
-        self.salt_off = np.zeros_like(self.water_mask, dtype=float)
-
     def setup_restoring(self):
         """Dynamically load restoring targets from the prepared climatology dataset."""
         self.restoring_data = {}
@@ -81,7 +82,7 @@ class OfflineSimulator:
             # 4. Restoring Weights (Sponge)
             print("Generating Restoring Map...")
             self.nudge_map = physics.create_restoring_weights(
-                self.water_mask, sponge_width, tau_lateral, tau_bottom, self.dt_phys
+                self.water_mask, sponge_width, tau_lateral, tau_bottom, self.dt_phys, self.is_global
             )
 
     def setup_io(self, da_ref):
@@ -92,7 +93,6 @@ class OfflineSimulator:
     def run(self, da_u, da_v, da_k, da_t, da_s, da_sw): 
         nt = da_t['time'].size
         print(f"Starting Simulation ({nt} days)...")
-        self.salt_off = np.nan_to_num(da_s.isel(time=0).values)
         
         for day in range(nt):
             print(f"  Day {day+1} / {nt}")
@@ -116,19 +116,10 @@ class OfflineSimulator:
             v[~self.water_mask] = 0.0
             w = physics.calculate_w(u, v, self.dz_static, self.dx, self.dy)  
             
-            for step in range(self.steps_per_day):
-                # A. Physics (Salinity Diagnostic)
-                self.salt_off = physics.advection_neumann(self.salt_off, u, v, w, self.dz_static, self.dt_phys, self.dx, self.dy)
-                if self.mixing_method == "diffusion":
-                    self.salt_off = physics.diffusion_robust(self.salt_off, k, self.dz_static, self.dt_phys)
-                elif self.mixing_method == "convective":
-                    self.salt_off = physics.mixing_convective(self.salt_off, rho_3d, self.dz_static, self.mld_threshold)                
-                self.salt_off[0,:,:] = s[0,:,:] # Surface Clamp
-                self.salt_off = np.maximum(self.salt_off, 0.0)
-                
+            for step in range(self.steps_per_day):     
                 # B. Physics (BGC Tracers)
                 for name, tr_data in self.bgc_model.tracers.items():
-                    tr_adv = physics.advection_neumann(tr_data, u, v, w, self.dz_static, self.dt_phys, self.dx, self.dy)
+                    tr_adv = physics.advection_neumann(tr_data, u, v, w, self.dz_static, self.dt_phys, self.dx, self.dy, is_global=self.is_global)
                     if self.mixing_method == "diffusion":
                         tr_mix = physics.diffusion_robust(tr_adv, k, self.dz_static, self.dt_phys)
                     elif self.mixing_method == "convective":
@@ -151,7 +142,6 @@ class OfflineSimulator:
     def save_day(self, day, current_time, par_3d):
         # 1. Gather 3D Data
         data_map = {name: arr for name, arr in self.bgc_model.tracers.items()}
-        data_map['SALT_OFF'] = self.salt_off
         data_map['PAR'] = par_3d
         
         ds_out = xr.Dataset(coords=self.ds_template.coords)

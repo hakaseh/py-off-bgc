@@ -138,35 +138,50 @@ def calculate_w(u, v, dz_3d, dx, dy):
     return w
 
 @njit(parallel=True, fastmath=True)
-def advection_neumann(tracer, u, v, w, dz, dt, dx, dy):
+def advection_neumann(tracer, u, v, w, dz, dt, dx, dy, is_global=False):
     nz, ny, nx = tracer.shape
-    tracer_new = np.zeros_like(tracer)
     
-    for j in prange(1, ny - 1):
+    # 1. INITIALIZATION FIX
+    # Copy the tracer instead of using zeros_like. 
+    # This prevents untouched boundary cells from turning into 0.0!
+    tracer_new = tracer.copy()
+    
+    # 2. SET ZONAL BOUNDARIES
+    # If global, compute every longitude (0 to nx). 
+    # If regional, skip the boundary walls (1 to nx-1).
+    i_start = 0 if is_global else 1
+    i_end = nx if is_global else nx - 1
+    
+    for j in prange(1, ny - 1):  # North/South usually remain hard boundaries (land/ice)
         for k in range(nz):
-            for i in range(1, nx - 1):
+            for i in range(i_start, i_end):
                 if dz[k, j, i] <= 1e-6: continue
 
                 dx_c = dx[j, i]
                 dy_c = dy[j, i]
                 dz_c = dz[k, j, i]
 
-                # --- 1. Horizontal (Collapsed Logic) ---
+                # --- 1. Horizontal ---
                 u_val = u[k, j, i]
                 v_val = v[k, j, i]
                 
                 # Identify Neighbors (Neumann Check Inline)
-                # If u>0, neighbor is i-1. If u<0, neighbor is i+1.
                 i_up = i - 1 if u_val > 0 else i + 1
                 j_up = j - 1 if v_val > 0 else j + 1
+                
+                # 3. APPLY PERIODIC BOUNDARY WRAP-AROUND
+                if is_global:
+                    if i_up < 0:
+                        i_up = nx - 1
+                    elif i_up >= nx:
+                        i_up = 0
                 
                 # Get Values (Check if neighbor is land)
                 c = tracer[k, j, i]
                 c_up_x = tracer[k, j, i_up] if dz[k, j, i_up] > 1e-6 else c
                 c_up_y = tracer[k, j_up, i] if dz[k, j_up, i] > 1e-6 else c
                 
-                # Generalized Advection Formula: |u| * (Center - Upwind) / dx
-                # Note: This effectively computes u * dC/dx
+                # Generalized Advection Formula
                 term_x = np.abs(u_val) * (c - c_up_x) / dx_c
                 term_y = np.abs(v_val) * (c - c_up_y) / dy_c
 
@@ -177,13 +192,10 @@ def advection_neumann(tracer, u, v, w, dz, dt, dx, dy):
                 elif k == nz - 1:
                     term_z = 0.0 if w_val > 0 else w_val * (tracer[k-1, j, i] - c) / dz_c
                 else:
-                    # For vertical, we stick to standard logic as indices are hard boundaries
                     if w_val > 0: term_z = w_val * (c - tracer[k+1, j, i]) / dz_c
                     else:         term_z = w_val * (tracer[k-1, j, i] - c) / dz_c
 
                 # --- 3. Total Change ---
-                # Since we calculated terms as |u|*(C-Cup)/dx, this IS the advection term.
-                # Just subtract it.
                 tracer_new[k, j, i] = c - dt * (term_x + term_y + term_z)
 
     return tracer_new
@@ -263,7 +275,7 @@ def diffusion_robust(tracer, k_z, dz_3d, dt):
                     
     return tracer_out
 
-def create_restoring_weights(water_mask, sponge_width, tau_lateral, tau_bottom, dt):
+def create_restoring_weights(water_mask, sponge_width, tau_lateral, tau_bottom, dt, is_global=False):
     """
     Creates a 3D rate array (1/sec) for restoring.
     It combines Lateral Sponge (Fast) and Seafloor Restoring (Slow).
@@ -284,12 +296,14 @@ def create_restoring_weights(water_mask, sponge_width, tau_lateral, tau_bottom, 
         weight = (sponge_width - i) / sponge_width
         val = weight * rate_lateral
         
-        # Apply to 4 sides
-        # Use np.maximum so we don't overwrite if corners overlap
-        restore_rate[:, :, i]      = np.maximum(restore_rate[:, :, i], val)       # West
-        restore_rate[:, :, -(i+1)] = np.maximum(restore_rate[:, :, -(i+1)], val)  # East
+        # Apply to North and South sides (Always active)
         restore_rate[:, i, :]      = np.maximum(restore_rate[:, i, :], val)       # South
         restore_rate[:, -(i+1), :] = np.maximum(restore_rate[:, -(i+1), :], val)  # North
+
+        # Apply to East and West sides ONLY if regional (not global)
+        if not is_global:
+            restore_rate[:, :, i]      = np.maximum(restore_rate[:, :, i], val)       # West
+            restore_rate[:, :, -(i+1)] = np.maximum(restore_rate[:, :, -(i+1)], val)  # East
 
     # --- B. SEAFLOOR RESTORING (The Fix) ---
     # We iterate over 2D surface to find the deepest wet cell k

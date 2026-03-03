@@ -148,6 +148,8 @@ class Model_NEMURO(BaseBGCModel):
             p.p_nit0,
             p.p_knit,
             p.p_vp2n0,
+            p.p_kp2n,
+            p.p_vp2d0,
             p.p_kp2d,
             p.p_vd2n0,
             p.p_kd2n,
@@ -239,6 +241,8 @@ class Model_NEMURO(BaseBGCModel):
         p_nit0,
         p_knit,
         p_vp2n0,
+        p_kp2n,
+        p_vp2d0,
         p_kp2d,
         p_vd2n0,
         p_kd2n,
@@ -304,61 +308,61 @@ class Model_NEMURO(BaseBGCModel):
                     # (1) Gross Primary Production rate of small phytoplankton
                     GppPSn = p_vmaxs * (
                         nitrate_c/(nitrate_c + p_kno3s)
-                        * exp(-p_this * ammonium_c)
+                        * np.exp(-p_this * ammonium_c)
                         + ammonium_c/(ammonium_c + p_knh4s)
-                        ) * exp(p_kgpps * temp_c
-                        ) * par_c/p_iopts * exp(1.0 - par_c/p_iopts) * PSn_c
+                        ) * np.exp(p_kgpps * temp_c
+                        ) * par_c/p_iopts * np.exp(1.0 - par_c/p_iopts) * PSn_c
                     # f-ratio of small phytoplankton
-                    RnewS = nitrate_c/(nitrate_c + p_kno3s)*exp(-p_this*ammonium_c
-                        )/(nitrate_c/(nitrate_c + p_kno3s)*exp(-p_this*ammonium_c)
-                        +ammonium_c/(ammonium_c+p_knh4s))
+                    RnewS = nitrate_c/(nitrate_c + p_kno3s)*np.exp(-p_this*ammonium_c
+                        )/(nitrate_c/(nitrate_c + p_kno3s)*np.exp(-p_this*ammonium_c)
+                        +ammonium_c/(ammonium_c+p_knh4s) + 1e-16)
                     # (2) Gross Primary Production rate of large phytoplankton                    
                     GppPLn = p_vmaxl * min(
                         nitrate_c/(nitrate_c+p_kno3l)
-                        *exp(-p_thil*ammonium_c)
+                        *np.exp(-p_thil*ammonium_c)
                         +ammonium_c/(ammonium_c+p_knh4l),
-                        silicate_c/(silicate_c+p_ksil)/p_sinpl
-                        )*exp(p_kgppl*temp_c)*par/p_ioptl*exp(
+                        silicate_c/(silicate_c+p_ksil)/p_rsinpl
+                        )*np.exp(p_kgppl*temp_c)*par_c/p_ioptl*np.exp(
                         1.0 - par_c/p_ioptl) * PLn_c
                     # f-ratio of large phytoplankton
-                    RnewL = nitrate_c/(nitrate_c + p_kno3sl)*exp(-p_thil*ammonium_c
-                        )/(nitrate_c/(nitrate_c + p_kno3l)*exp(-p_thil*ammonium_c)
-                        +ammonium_c/(ammonium_c+p_knh4l))
+                    RnewL = nitrate_c/(nitrate_c + p_kno3l)*np.exp(-p_thil*ammonium_c
+                        )/(nitrate_c/(nitrate_c + p_kno3l)*np.exp(-p_thil*ammonium_c)
+                        +ammonium_c/(ammonium_c+p_knh4l) + 1e-16)
                     # (3) Respiration rate of small phytoplankton
-                    ResPSn = p_resps0*exp(p_kresps*temp_c) * PSn_c
+                    ResPSn = p_resps0*np.exp(p_kresps*temp_c) * PSn_c
                     # (4) Respiration rate of large phytoplankton
-                    ResPLn = p_respl0*exp(p_krespl*temp_c) * PLn_c
+                    ResPLn = p_respl0*np.exp(p_krespl*temp_c) * PLn_c
                     # (5) Mortality rate of small phytoplankton
-                    MorPSn = p_morps0*exp(p_kmorps*temp_c) * PSn_c**2
+                    MorPSn = p_morps0*np.exp(p_kmorps*temp_c) * PSn_c**2
                     # (6) Mortality rate of large phytoplankton
-                    MorPLn = p_morpl0*exp(p_kmorpl*temp_c) * PLn_c**2
+                    MorPLn = p_morpl0*np.exp(p_kmorpl*temp_c) * PLn_c**2
                     # (7) Extracellular excretion rate of small phytoplankton
                     ExcPSn = p_gs*GppPSn
                     # (8) Extracellular excretion rate of large phytoplankton
                     ExcPLn = p_gl*GppPLn
                     # (9) Grazing rate of small phytoplankton by small zooplankton
-                    GraPS2ZSn = max(0.0, p_grmaxsps*exp(p_kgras*temp_c)
-                        *(1.0 - exp(p_ls*(p_ps2zs - PSn_c))) * ZSn_c)
+                    GraPS2ZSn = max(0.0, p_grmaxsps*np.exp(p_kgras*temp_c)
+                        *(1.0 - np.exp(p_ls*(p_ps2zs - PSn_c))) * ZSn_c)
                     # (10) Grazing rate of small phytoplankton by large zooplankton
-                    GraPS2ZLn = max(0.0, p_grmaxlps*exp(p_kgral*temp_c)
-                        *(1.0 - exp(p_ll*(p_ps2zl - ZSn_c))) * ZLn_c)
+                    GraPS2ZLn = max(0.0, p_grmaxlps*np.exp(p_kgral*temp_c)
+                        *(1.0 - np.exp(p_ll*(p_ps2zl - ZSn_c))) * ZLn_c)
                     # (11) Grazing rate of large phytoplankton by large zooplankton
-                    GraPL2ZLn = max(0.0, p_grmaxlpl*exp(p_kgral*temp_c)
-                        *(1.0 - exp(p_ll*(p_pl2zl - PLn_c))) * ZLn_c)
+                    GraPL2ZLn = max(0.0, p_grmaxlpl*np.exp(p_kgral*temp_c)
+                        *(1.0 - np.exp(p_ll*(p_pl2zl - PLn_c))) * ZLn_c)
                     # (12) Grazing rate of small zooplankton by large zooplankton
-                    GraZS2ZLn = max(0.0, p_grmaxlzs*exp(p_kgral*temp_c)
-                        *(1.0 - exp(p_ll*(p_zs2zl - ZSn_c))) * ZLn_c)
+                    GraZS2ZLn = max(0.0, p_grmaxlzs*np.exp(p_kgral*temp_c)
+                        *(1.0 - np.exp(p_ll*(p_zs2zl - ZSn_c))) * ZLn_c)
                     # (13) Grazing rate of large phytoplankton by predatory zooplankton
-                    GraPL2ZPn = max(0.0, p_grmaxppl*exp(p_kgrap*temp_c)
-                        *(1.0 - exp(p_lp*(p_pl2zp - PLn_c))) * ZPn_c
-                        *exp(-p_thipl*(ZLn_c + ZSn_c)))
+                    GraPL2ZPn = max(0.0, p_grmaxppl*np.exp(p_kgrap*temp_c)
+                        *(1.0 - np.exp(p_lp*(p_pl2zp - PLn_c))) * ZPn_c
+                        *np.exp(-p_thipl*(ZLn_c + ZSn_c)))
                     # (14) Grazing rate of small zooplankton by predatory zooplankton
-                    GraZS2ZPn = max(0.0, p_grmaxpzs*exp(p_kgrap*temp_c)
-                        *(1.0 - exp(p_lp*(p_zs2zp - ZSn_c))) * ZPn_c
-                        *exp(-p_thizs*ZLn_c))
+                    GraZS2ZPn = max(0.0, p_grmaxpzs*np.exp(p_kgrap*temp_c)
+                        *(1.0 - np.exp(p_lp*(p_zs2zp - ZSn_c))) * ZPn_c
+                        *np.exp(-p_thizs*ZLn_c))
                     # (15) Grazing rate of large zooplankton by predatory zooplankton
-                    GraZL2ZPn = max(0.0, p_grmaxpzl*exp(p_kgrap*temp_c)
-                        *(1.0 - exp(p_lp*(p_zl2zp - ZLn_c))) * ZPn_c)
+                    GraZL2ZPn = max(0.0, p_grmaxpzl*np.exp(p_kgrap*temp_c)
+                        *(1.0 - np.exp(p_lp*(p_zl2zp - ZLn_c))) * ZPn_c)
                     # (16) Excretion rate of small zooplankton
                     ExcZSn = (p_alphazs - p_betazs)*GraPS2ZSn
                     # (17) Excretion rate of large zooplankton
@@ -376,19 +380,19 @@ class Model_NEMURO(BaseBGCModel):
                     EgeZPn = (1.0 - p_alphazp) * (
                         GraPL2ZPn + GraZS2ZPn + GraZL2ZPn)
                     # (22) Mortality rate of small zooplankton
-                    MorZSn = p_morzs0 * exp(p_kmorzs * temp_c) * ZSn**2
+                    MorZSn = p_morzs0 * np.exp(p_kmorzs * temp_c) * ZSn_c**2
                     # (23) Mortality rate of large zooplankton
-                    MorZLn = p_morzl0 * exp(p_kmorzl * temp_c) * ZLn**2
+                    MorZLn = p_morzl0 * np.exp(p_kmorzl * temp_c) * ZLn_c**2
                     # (24) Mortality rate of predatory zooplankton
-                    MorZPn = p_morzp0 * exp(p_kmorzp * temp_c) * ZPn**2
+                    MorZPn = p_morzp0 * np.exp(p_kmorzp * temp_c) * ZPn_c**2
                     # (25) Decomposition rate from PON to ammonium
-                    DecP2N = p_vp2n0 * exp(p_kp2n * temp_c) * PON_c 
+                    DecP2N = p_vp2n0 * np.exp(p_kp2n * temp_c) * PON_c 
                     # (26) Decomposition rate from PON to DON
-                    DecP2D = p_vp2d0 * exp(p_kp2d * temp_c) * PON_c 
+                    DecP2D = p_vp2d0 * np.exp(p_kp2d * temp_c) * PON_c 
                     # (27) Decomposition rate from DON to ammonium
-                    DecD2N = p_vd2n0 * exp(p_kd2n * temp_c) * DON_c 
+                    DecD2N = p_vd2n0 * np.exp(p_kd2n * temp_c) * DON_c 
                     # (28) Nitrification rate
-                    Nit = p_nit0 * exp(p_knit * temp_c) * ammonium_c
+                    Nit = p_nit0 * np.exp(p_knit * temp_c) * ammonium_c
                     # (29) Sinking rate of PON
                     ### Computed elsewhere
                     
@@ -411,7 +415,7 @@ class Model_NEMURO(BaseBGCModel):
                     # (37) Egestion rate of predatory zooplankton
                     EgeZPsi = EgeZPn * p_rsinpl
                     # (38) Decomposition rate from Opal to silicate
-                    DecP2Si = p_vp2si0 * exp(p_kp2si * temp_c) * Opal_c
+                    DecP2Si = p_vp2si0 * np.exp(p_kp2si * temp_c) * Opal_c
                     # (39) Sedimentation rate of Opal [sinking?]
                     ### Computed elsewhere
     
@@ -430,7 +434,7 @@ class Model_NEMURO(BaseBGCModel):
                     
                     # A.2. Silicon (suffix si is added for silicon cycle of all compartments and of each process)
                     d_DON = ExcPSn + ExcPLn + DecP2D - DecD2N
-                    d_PLsi = GppPLsi - ResPLsi - MorPLsi - ExcPLi - GraPL2ZLsi - GraPL2ZPsi
+                    d_PLsi = GppPLsi - ResPLsi - MorPLsi - ExcPLsi - GraPL2ZLsi - GraPL2ZPsi
                     d_ZLsi = GraPL2ZLsi - EgeZLsi
                     d_ZPsi = GraPL2ZPsi - EgeZPsi
                     d_silicate = - GppPLsi + ResPLsi + ExcPLsi + DecP2Si
@@ -529,10 +533,12 @@ class Params_BGC:
     p_nit0: float = 0.03
     p_knit: float = 0.0693
     p_vp2n0: float = 0.1
+    p_kp2n: float = 0.0693
+    p_vp2d0: float = 0.1
     p_kp2d: float = 0.0693
-    p_vd2n0: float = 0.1
+    p_vd2n0: float = 0.02
     p_kd2n: float = 0.0693
-    p_vp2si0: float = 0.02
+    p_vp2si0: float = 0.1
     p_kp2si: float = 0.0693
     p_rsinpl: float = 2.0 # Si:N ratio of plankton
     p_setvp: float = 40

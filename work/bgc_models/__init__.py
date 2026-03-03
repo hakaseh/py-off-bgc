@@ -2,13 +2,13 @@
 
 # 1. Import all your models here
 from .npzd_sasai import Model_NPZD
-# from .nemuro_kishi import Model_NEMURO   # Uncomment when ready
+from .nemuro import Model_NEMURO
 # from .enemuro_yoshie import Model_eNEMURO       # Future models...
 
 # 2. Create a Registry (Dictionary mapping string names to Classes)
 MODEL_REGISTRY = {
     "NPZD": Model_NPZD,
-    # "NEMURO": Model_NEMURO,
+    "NEMURO": Model_NEMURO,
     # "eNEMURO": Model_eNEMURO
 }
 
