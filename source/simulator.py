@@ -3,8 +3,8 @@ import xarray as xr
 import pandas as pd
 import os
 import gsw
-import physics
-from bgc_models.utils import GLODAP_MAP
+from . import physics
+from .bgc_models.utils import GLODAP_MAP
 
 class OfflineSimulator:
     def __init__(self, 
@@ -87,7 +87,7 @@ class OfflineSimulator:
 
     def setup_io(self, da_ref):
         self.ds_template = da_ref.isel(time=0).drop_vars('time')
-        self.out_dir = f"../output/{self.model_name}_{self.exp_name}_{self.extra_name}"
+        self.out_dir = f"output/{self.model_name}_{self.exp_name}_{self.extra_name}"
         os.makedirs(self.out_dir, exist_ok=True)
         
     def run(self, da_u, da_v, da_k, da_t, da_s, da_sw): 
@@ -116,27 +116,38 @@ class OfflineSimulator:
             v[~self.water_mask] = 0.0
             w = physics.calculate_w(u, v, self.dz_static, self.dx, self.dy)  
             
-            for step in range(self.steps_per_day):     
-                # B. Physics (BGC Tracers)
+            # --- SUB-STEPPED LOOP (Physics + Biology + Restoring) ---
+            for step in range(self.steps_per_day):
+                
+                # A. PHYSICS
                 for name, tr_data in self.bgc_model.tracers.items():
+                    # Advection
                     tr_adv = physics.advection_neumann(tr_data, u, v, w, self.dz_static, self.dt_phys, self.dx, self.dy, is_global=self.is_global)
+                    
+                    # Mixing
                     if self.mixing_method == "diffusion":
                         tr_mix = physics.diffusion_robust(tr_adv, k, self.dz_static, self.dt_phys)
                     elif self.mixing_method == "convective":
                         tr_mix = physics.mixing_convective(tr_adv, rho_3d, self.dz_static, self.mld_threshold)
-                    self.bgc_model.tracers[name][:] = np.maximum(tr_mix, 0.0)                
-                # C. Restoring (Sponge)
-                # We iterate over whatever restoring data we successfully loaded
+                        
+                    self.bgc_model.tracers[name][:] = np.maximum(tr_mix, 0.0)
+
+                # B. RESTORING (Sponge)
+                # Using the original nudge_map which is scaled for dt_phys
                 for var_name, clim_data in self.restoring_data.items():
                     diff = clim_data - self.bgc_model.tracers[var_name]
                     self.bgc_model.tracers[var_name] += diff * self.nudge_map
-                
-                # D. Biology & Sinking
+
+                # C. BIOLOGY & SINKING
+                # Passing the small dt_phys to prevent non-linear overshoots
                 par_3d = self.bgc_model.biology_step(t, sw, self.dz_static, self.dt_phys)
                 self.bgc_model.sinking_step(self.dz_static, self.dt_phys)
+                
+                # Final safety clamp
                 for name, tr_data in self.bgc_model.tracers.items():
-                    self.bgc_model.tracers[name][:] = np.maximum(tr_data, 0.0)                
-            # 4. Save Output
+                    self.bgc_model.tracers[name][:] = np.maximum(tr_data, 0.0)
+                                    
+            # ... Save Output ...              
             self.save_day(day, da_t.isel(time=day).time.values, par_3d)
 
     def save_day(self, day, current_time, par_3d):
@@ -163,7 +174,7 @@ class OfflineSimulator:
         ds_out = ds_out.expand_dims(time=[current_time])
         
         t_str = pd.to_datetime(current_time).strftime('%Y%m%d')
-        fname = f"{self.out_dir}/output_{self.model_name}_{self.exp_name}_{self.exp_name}_{t_str}.nc"
+        fname = f"{self.out_dir}/output_{self.model_name}_{self.exp_name}_{t_str}.nc"
         
         if os.path.exists(fname):
             try:

@@ -1,0 +1,98 @@
+import numpy as np
+import math
+from numba import njit, prange
+
+# Mapping: Model Standard Name -> GLODAP File Name
+GLODAP_MAP = {
+    'nitrate': 'NO3',
+    'phosphate': 'PO4',
+    'silicate': 'silicate',
+    'oxygen': 'oxygen',
+    'dic': 'TCO2',
+    'alk': 'TAlk'
+}
+
+@njit(parallel=True, fastmath=True)
+def calculate_par(sw_surface, psum, dz):
+    """
+    Beer-Lambert Law for light attenuation.
+    Shared by all models.
+    """
+    nz, ny, nx = dz.shape
+    par = np.zeros((nz, ny, nx))
+    
+    # Coefficients (Make sure these match your physics!)
+    k_water = 0.04
+    k_phyto = 0.03
+
+    for j in prange(ny):
+        for i in range(nx):
+            # Surface PAR (approx 43% of SW radiation)
+            light = sw_surface[j, i] * 0.43
+            
+            for k in range(nz):
+                # Attenuation
+                k_total = k_water + k_phyto * psum[k, j, i]
+                layer_depth = dz[k, j, i]
+                
+                # Light at center of layer
+                par[k, j, i] = light * np.exp(-0.5 * k_total * layer_depth)
+                
+                # Light entering next layer
+                light = light * np.exp(-k_total * layer_depth)
+                
+    return par
+
+@njit(parallel=True, fastmath=True)
+def apply_sinking(tracer, dz, dt, w_sink):
+    """
+    Generic Vertical Sinking (Upwind Scheme) with Adaptive Sub-stepping.
+    Equation: dC/dt = -d(w*C)/dz
+    """
+    nz, ny, nx = tracer.shape
+    
+    # 1. Use .copy() instead of zeros_like so land/skipped cells aren't erased
+    tracer_new = tracer.copy()
+    
+    # Convert speed: m/day -> m/s
+    w_s = w_sink / 86400.0
+    
+    if w_s <= 0.0:
+        return tracer_new  # Skip math if it doesn't sink
+        
+    # 2. Find minimum dz to calculate the CFL safety limit
+    min_dz = 1e6
+    for k in range(nz):
+        for j in range(ny):
+            for i in range(nx):
+                if dz[k, j, i] > 1e-6 and dz[k, j, i] < min_dz:
+                    min_dz = dz[k, j, i]
+                    
+    # 3. Calculate safe sub-step (Max distance per step = 90% of thinnest cell)
+    dt_safe = (min_dz / w_s) * 0.9 
+    n_steps = int(math.ceil(dt / dt_safe))
+    dt_sub = dt / n_steps  # The actual safe time step we will use
+    
+    # 4. Perform Sinking in Safe, Bite-Sized Steps
+    for step in range(n_steps):
+        # Buffer to read from during this specific sub-step
+        tracer_current = tracer_new.copy()
+        
+        for j in prange(ny):
+            for i in range(nx):
+                
+                # Top Layer (k=0): No flux from above, loses mass to below
+                if dz[0, j, i] > 1e-6:
+                    loss = (w_s * tracer_current[0, j, i]) / dz[0, j, i]
+                    tracer_new[0, j, i] = tracer_current[0, j, i] - (loss * dt_sub)
+                
+                # Interior Layers
+                for k in range(1, nz):
+                    if dz[k, j, i] > 1e-6:
+                        # Gain from above (k-1), Lose to below (k)
+                        gain = (w_s * tracer_current[k-1, j, i]) / dz[k, j, i]
+                        loss = (w_s * tracer_current[k, j, i])   / dz[k, j, i]
+                        
+                        tracer_new[k, j, i] = tracer_current[k, j, i] + dt_sub * (gain - loss)
+                    
+    return tracer_new
