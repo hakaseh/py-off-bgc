@@ -104,6 +104,8 @@ class OfflineSimulator:
             t = np.nan_to_num(da_t.isel(time=day).values)
             s = np.nan_to_num(da_s.isel(time=day).values)
             sw = np.nan_to_num(da_sw.isel(time=day).values)
+            wind_surf = np.nan_to_num(da_wind.isel(time=day).values) 
+            ice_surf = np.nan_to_num(da_ice.isel(time=day).values)            
             
             # 2. Calculate Density and MLD
             SA = gsw.SA_from_SP(s, self.p_3d, self.lon_2d, self.lat_2d)
@@ -111,42 +113,69 @@ class OfflineSimulator:
             rho_3d = gsw.sigma0(SA, CT)
             self.mld_2d = physics.calculate_mld(rho_3d, self.dz_static, self.mld_threshold)
             
-            # 2. Calc W
+            # Calc W
             u[~self.water_mask] = 0.0
             v[~self.water_mask] = 0.0
             w = physics.calculate_w(u, v, self.dz_static, self.dx, self.dy)  
+
+            # Calculate O2 Saturation ONCE per day
+            if "oxygen" in self.bgc_model.tracers:
+                # We only need saturation for the surface layer (k=0)
+                salt_surf = s[0, :, :]
+                temp_surf = t[0, :, :]
+                rho_surf = rho_3d[0, :, :]
+                o2_sat_umol_kg = gsw.O2sol_SP_pt(salt_surf, temp_surf)
+                o2_sat_mmol_m3 = o2_sat_umol_kg * (rho_surf / 1000.0)
             
             # --- SUB-STEPPED LOOP (Physics + Biology + Restoring) ---
             for step in range(self.steps_per_day):
                 
                 # A. PHYSICS
                 for name, tr_data in self.bgc_model.tracers.items():
-                    # Advection
                     tr_adv = physics.advection_neumann(tr_data, u, v, w, self.dz_static, self.dt_phys, self.dx, self.dy, is_global=self.is_global)
                     
-                    # Mixing
                     if self.mixing_method == "diffusion":
                         tr_mix = physics.diffusion_robust(tr_adv, k, self.dz_static, self.dt_phys)
                     elif self.mixing_method == "convective":
                         tr_mix = physics.mixing_convective(tr_adv, rho_3d, self.dz_static, self.mld_threshold)
                         
+                    # CLAMP #1: Immediately after physics to fix advection overshoots
                     self.bgc_model.tracers[name][:] = np.maximum(tr_mix, 0.0)
 
-                # B. RESTORING (Sponge)
-                # Using the original nudge_map which is scaled for dt_phys
+                # B. RESTORING
                 for var_name, clim_data in self.restoring_data.items():
                     diff = clim_data - self.bgc_model.tracers[var_name]
                     self.bgc_model.tracers[var_name] += diff * self.nudge_map
 
                 # C. BIOLOGY & SINKING
-                # Passing the small dt_phys to prevent non-linear overshoots
                 par_3d = self.bgc_model.biology_step(t, sw, self.dz_static, self.dt_phys)
                 self.bgc_model.sinking_step(self.dz_static, self.dt_phys)
-                
-                # Final safety clamp
+
+                # CLAMP #2: Immediately after biology/sinking to fix Euler overshoots!
+                # THIS MUST BE INSIDE THE SUB-STEP LOOP!
                 for name, tr_data in self.bgc_model.tracers.items():
                     self.bgc_model.tracers[name][:] = np.maximum(tr_data, 0.0)
-                                    
+
+                # D. AIR-SEA FLUX (OXYGEN)
+                if "oxygen" in self.bgc_model.tracers:
+                    o2_surf = self.bgc_model.tracers["oxygen"][0, :, :]
+                    temp_surf = t[0, :, :]
+                    dz_surf = self.dz_static[0, :, :]
+                    
+                    # Apply a tiny fraction of the flux using dt_phys
+                    updated_o2_surf = physics.calc_o2_flux(
+                        o2_surf, 
+                        o2_sat_mmol_m3, # Pre-calculated above!
+                        temp_surf, 
+                        wind_surf, 
+                        ice_surf, 
+                        dz_surf, 
+                        self.dt_phys    # <-- Use dt_phys for stability!
+                    )
+                    
+                    # Final safety clamp for the surface layer
+                    self.bgc_model.tracers["oxygen"][0, :, :] = np.maximum(updated_o2_surf, 0.0)
+                
             # ... Save Output ...              
             self.save_day(day, da_t.isel(time=day).time.values, par_3d)
 

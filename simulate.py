@@ -13,6 +13,8 @@ import xarray as xr
 from source import bgc_models
 from source.simulator import OfflineSimulator
 
+# --- Start of user specification ---
+
 # --- 1. CONFIGURATION ---
 # Your output directory will be named {input_name}_{bgc_model_choice}_{extra_name}
 input_name = "BRAN2020"
@@ -27,15 +29,6 @@ is_global_choice = True
 restart_date = "20160331"
 restart_file = f"output/{bgc_model_choice}_{input_name}_{extra_name}/output_{bgc_model_choice}_{input_name}_{extra_name}_{restart_date}.nc"
 restart_file = None
-
-# Files
-dir_exp = f"input/{input_name}"
-file_t = f"{dir_exp}/ocean_temp_*.nc"
-file_s = f"{dir_exp}/ocean_salt_*.nc"
-file_u = f"{dir_exp}/ocean_u_*.nc"
-file_v = f"{dir_exp}/ocean_v_*.nc"
-file_k = None #f"{dir_exp}/input_{input_name}_k_{infile_suffix}"
-file_sw = f"{dir_exp}/rsds_*.nc"
 clim_file = f"climatology/{input_name}/GLODAPv2.2016b.ALL_{input_name}.nc"
 
 # Domain Slicing
@@ -45,42 +38,35 @@ depth_range = slice(None, None) #0, 1000) # 0, 300)
 time_range  = slice("20160101","20161231")#None, None) 
 
 # --- 2. LOAD & SLICE DATA ---
-# CHECK: variable and dimension names (modify if necessary)
-print("Loading and slicing datasets...")
-ds_t = xr.open_mfdataset(file_t, chunks={"time": 1},
-                         drop_variables=["Time_bounds", "average_DT"])["temp"].rename(
-    {"xt_ocean":"lon","yt_ocean":"lat","st_ocean":"depth","Time":"time"}).sel(
-    time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
-ds_s = xr.open_mfdataset(file_s, chunks={"time": 1},
-                         drop_variables=["Time_bounds", "average_DT"])["salt"].rename(
-    {"xt_ocean":"lon","yt_ocean":"lat","st_ocean":"depth","Time":"time"}).sel(
-    time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
-ds_u = xr.open_mfdataset(file_u, chunks={"time": 1},
-                         drop_variables=["Time_bounds", "average_DT"])["u"].rename(
-    {"xu_ocean":"lon","yu_ocean":"lat","st_ocean":"depth","Time":"time"}).sel(
-    time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
-ds_u = ds_u.interp(lon=ds_s.lon, lat=ds_s.lat, kwargs={"fill_value": "extrapolate"})
-ds_v = xr.open_mfdataset(file_v, chunks={"time": 1},
-                         drop_variables=["Time_bounds", "average_DT"])["v"].rename(
-    {"xu_ocean":"lon","yu_ocean":"lat","st_ocean":"depth","Time":"time"}).sel(
-    time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
-ds_v = ds_v.interp(lon=ds_s.lon, lat=ds_s.lat, kwargs={"fill_value": "extrapolate"})
-ds_sw = xr.open_mfdataset(file_sw, chunks={"time": 1})["rsds"].rename(
-    {"xt_ocean":"lon","yt_ocean":"lat"}).sel(
-    time=time_range, lat=lat_range, lon=lon_range)
+# Mandatory input (modify as necessary)
+ds_t = xr.open_mfdataset("path_to_file")
+ds_s = xr.open_mfdataset("path_to_file")
+ds_u = xr.open_mfdataset("path_to_file")
+ds_v = xr.open_mfdataset("path_to_file")
+ds_sw = xr.open_mfdataset("path_to_file")
+ds_wind = xr.open_mfdataset("path_to_file")
+# Optional input (set to None if not providing)
+ds_k = xr.open_mfdataset("path_to_file")
+ds_ice = xr.open_mfdataset("path_to_file")
 
-# --- MISSING K_z LOGIC ---
+
+# --- End of user specification ---
+# ---
+# You should not have to modify the rest of the code
+
 if file_k:
     print("  -> Found Kz file. Using standard diffusion.")
-    ds_k = xr.open_mfdataset(file_k)[name_k].sel(
-        time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
     mixing_choice = "diffusion" 
 else:
-    print("  -> WARNING: No Kz file found!")
+    print("  -> No Kz file found!")
     print("     Creating dummy Kz array and forcing 'convective' mixing.")
     # Creates a dummy array of exactly the right shape and coordinates
     ds_k = xr.zeros_like(ds_t) 
     mixing_choice = "convective"
+
+if not ds_ice:
+    print("Ice concentration data was not provided so setting all to ONE (no ice cover).")
+    ds_ice = xr.ones_like(ds_t)
 
 # Load BGC Inputs exactly the same way!
 ds_clim = xr.open_mfdataset(clim_file).sel(depth=depth_range,lat=lat_range,lon=lon_range)
@@ -88,6 +74,16 @@ ds_clim = xr.open_mfdataset(clim_file).sel(depth=depth_range,lat=lat_range,lon=l
 ds_restart = None
 if restart_file:
     ds_restart = xr.open_dataset(restart_file).sel(depth=depth_range,lat=lat_range,lon=lon_range)
+
+# Subsetting in space and time
+ds_t = ds_t.sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
+ds_s = ds_s.sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
+ds_u = ds_u.sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
+ds_v = ds_v.sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
+ds_k = ds_k.sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
+ds_sw = ds_sw.sel(time=time_range, lat=lat_range, lon=lon_range)
+ds_wind = ds_wind.sel(time=time_range, lat=lat_range, lon=lon_range)
+ds_ice = ds_ice.sel(time=time_range, lat=lat_range, lon=lon_range)
 
 nz, ny, nx = ds_t.depth.size, ds_t.lat.size, ds_t.lon.size
 mask = ~np.isnan(ds_t.isel(time=0).values)

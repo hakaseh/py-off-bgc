@@ -1,5 +1,6 @@
 import numpy as np
 from numba import njit, prange
+import math
 
 @njit(fastmath=True)
 def haversine_dist(lon1, lat1, lon2, lat2):
@@ -478,3 +479,65 @@ def calculate_mld(rho_3d, dz_3d, delta_rho_mld):
             mld_2d[j, i] = current_depth
             
     return mld_2d
+
+
+@njit(parallel=True, fastmath=True)
+def calc_o2_flux(o2_surf, o2_saturation, temp_surf, wind_speed, ice_fraction, dz_surf, dt_step):
+    """
+    Calculates the air-sea flux of Dissolved Oxygen for the surface layer (k=0).
+    Uses Wanninkhof (2014) for piston velocity with dynamic Schmidt numbers, 
+    and applies a sea ice mask.
+    
+    Args:
+        o2_surf: 2D array of surface O2 (mmol/m3)
+        o2_saturation: 2D array of O2 saturation (mmol/m3) calculated via gsw
+        temp_surf: 2D array of Sea Surface Temperature (Celsius)
+        wind_speed: 2D array of 10m wind speed (m/s)
+        ice_fraction: 2D array of sea ice concentration (0.0 to 1.0)
+        dz_surf: 2D array of surface grid cell thickness (m)
+        dt_step: Time step (seconds)
+        
+    Returns:
+        o2_updated: 2D array of updated surface O2 concentrations
+    """
+    ny, nx = o2_surf.shape
+    
+    # Use .copy() to preserve land values/masks safely
+    o2_updated = o2_surf.copy()
+    
+    for j in prange(ny):
+        for i in range(nx):
+            if dz_surf[j, i] < 1e-6:
+                continue # Skip land
+                
+            o2_local = o2_surf[j, i]
+            sat_local = o2_saturation[j, i]
+            temp_local = temp_surf[j, i]
+            wind_local = wind_speed[j, i]
+            ice_local = ice_fraction[j, i]
+            
+            # 1. Calculate Schmidt number for O2 (Wanninkhof 2014)
+            # Valid for seawater from -2 to 40 Celsius
+            sc_o2 = (1920.4 
+                     - 135.6 * temp_local 
+                     + 5.2122 * (temp_local**2) 
+                     - 0.10939 * (temp_local**3) 
+                     + 0.00093777 * (temp_local**4))
+                     
+            sc_o2 = max(sc_o2, 1.0) # Safety clamp to prevent negative/zero division
+            
+            # 2. Calculate Piston Velocity (kw) in cm/hr
+            kw_cm_hr = 0.251 * (wind_local**2) * ((sc_o2 / 660.0)**-0.5)
+            
+            # Convert kw from cm/hr to m/s
+            kw_m_s = kw_cm_hr * (1.0 / 100.0) * (1.0 / 3600.0)
+            
+            # 3. Calculate Flux (mmol O2 / m2 / s)
+            # Scale by open water fraction so solid ice prevents gas exchange
+            open_water_fraction = max(0.0, 1.0 - ice_local)
+            flux = kw_m_s * (sat_local - o2_local) * open_water_fraction
+            
+            # 4. Apply flux to the surface layer concentration
+            o2_updated[j, i] = o2_local + (flux / dz_surf[j, i]) * dt_step
+
+    return o2_updated
