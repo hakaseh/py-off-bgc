@@ -1,0 +1,11 @@
+xarray 
+dask 
+distributed 
+netCDF4 
+numba 
+numpy 
+scipy 
+pandas
+gsw
+matplotlib
+ipykernel

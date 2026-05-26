@@ -1,0 +1,17 @@
+name: env_py-off-bgc
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python
+  - xarray
+  - dask
+  - distributed
+  - netcdf4
+  - numba
+  - numpy
+  - scipy
+  - pandas
+  - gsw
+  - matplotlib
+  - ipykernel
