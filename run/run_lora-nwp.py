@@ -6,9 +6,9 @@ import xarray as xr
 from source.simulator import OfflineSimulator
 
 # --- 1. CONFIGURATION ---
-exp_name = "JCOPE-FGO"
+exp_name = "LORA"
 bgc_model_choice = "NEMURO"
-dt_in_sec = 1800
+dt_in_sec = 1200
 mld_choice = 0.03 
 sponge_choice = 1
 tau_lateral_choice = 86400.0 * 1
@@ -18,18 +18,18 @@ restart_file = None #f"output/{bgc_model_choice}_{exp_name}/restart.nc"
 clim_file = f"climatology/{exp_name}/GLODAPv2.2016b.ALL_{exp_name}.nc"
 
 # Domain Slicing
-lat_range   = slice(None, None) #17, 50)
-lon_range   = slice(None, None) #117, 150)
+lat_range   = slice(17, 50)
+lon_range   = slice(117, 150)
 depth_range = slice(None, None) #0, 300)
-time_range  = slice(None, None) #"20160101", "20161231")
+time_range  = slice(None, None) #"20230101", "20231231")
 
 # --- 2. LOAD PHYSICAL DATA (CMEMS SPECIFIC) ---
 print("Loading raw datasets...")
-ds_t = xr.open_mfdataset('input/JCOPE-FGO/interp_JCOPE-FGO_NWP_T.nc*')['tm']
-ds_s = xr.open_mfdataset('input/JCOPE-FGO/interp_JCOPE-FGO_NWP_S.nc*')['sm']
-ds_u = xr.open_mfdataset('input/JCOPE-FGO/interp_JCOPE-FGO_NWP_U.nc*')['um']
-ds_v = xr.open_mfdataset('input/JCOPE-FGO/interp_JCOPE-FGO_NWP_V.nc*')['vm']
-ds_sw = xr.open_mfdataset('input/JCOPE-FGO/nc_sigma/NSWR/NSWR_*_NWP.nc').squeeze()['nswrm']
+ds_t = xr.open_mfdataset('input/LORA/input_LORA_t_npac.2023*.nc')['t']
+ds_s = xr.open_mfdataset('input/LORA/input_LORA_s_npac.2023*.nc')['s']
+ds_u = xr.open_mfdataset('input/LORA/input_LORA_u_npac.2023*.nc')['u']
+ds_v = xr.open_mfdataset('input/LORA/input_LORA_v_npac.2023*.nc')['v']
+ds_sw = xr.open_mfdataset('input/LORA/input_LORA_swr_npac.2023*.nc')['swr']
 
 # Optional input
 ds_k = None

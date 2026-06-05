@@ -24,7 +24,7 @@ source env/bin/activate
 pip install -r requirements.txt
 ```
 
-## An example: GOEPR_ERA5_Hokkaido
+### An example test case: GOEPR_ERA5_Hokkaido
 
 * Download the forcing dataset from [Zenodo](https://zenodo.org/records/19703262).
 * Rename the above dataset directory as **GOEPR_ERA5_Hokkaido** and place it under `py-off-bgc/input`.
@@ -35,12 +35,17 @@ cd;
 cd py-off-bgc
 python -m run.run_goepr
 ```
+
+## Run files (to be moved to run/README.md)
+* Rename to required dimension names (lon, lat, depth, time)
+* Interpolate spatially and/or temporally (see examples from BRAN2020 for spatial interpolation and GOEPR for temporal interpolation)
+
 ## Supported ocean models
 
-* JCOPE NCEP CFS
-* LORA 2016-2023 JRA55do
+* JCOPE-FGO NCEP-CFS
+* LORA-NWP 2016-2023 JRA55do
 * BRAN2020 JRA55do
-* OFES2_NP10 JRA55do
+* OFES2-NP10 JRA55do
 
 ### BRAN2020
 - T and S have different lon-lat grid from U and V. It must be interpolated during the simulation.
@@ -90,8 +95,23 @@ sim = OfflineSimulator(
 ```
 
 
-# Simulation time (per day)
+# Simulation time, CPU and RAM usage
+Some computational stats can be calculated using either `/usr/bin/time` (for Linux) or `/opt/homebrew/bin/gtime` (for Mac). For example:
 
+```
+/usr/bin/time -v python -m run.run_jcope-fgo
+/opt/homebrew/bin/gtime -v python -m run.run_jcope-fgo
+```
+Benchmarking with Oyashio (32 CPUs)
+* JCOPE-FGO-NEMURO: 1 year, T-domain, 1800s, 3 hours, 6 CPUs, 2.6 GB --> blow up.
+* LORA-NWP-NEMURO: 1 year, T-domain, 1800s, 3 hours, 6 CPUs, 2.9 GB --> blow up.
+* JCOPE-FGO-NEMURO: 1 year, T-domain, 1200s, 8.5 hours, 685 %, 2.6 GB --> seems stable
+* LORA-NWP-NEMURO: 1 year, T-domain, 600s, 15.5 hours, 639 %, 3392064 KB --> unstable.
+* LORA-NWP-NEMURO: 1 year, T-domain, 450s, 20.25 hours, 675 %, 3373544 KB --> unstable.
+* LORA-NWP-NEMURO: 1 year, T-domain, 450s, 20.25 hours, 675 %, 3373544 KB --> 
+
+
+Computing time per day of simulation: (To be deleted)
 - BRAN2020-NPZD, 60S-60N, full depth, 600 s, 90 min
 - LORA-NEMURO, full domain, 1000 m, 1200 s, 5 min
 - LORA-NPZD, full domain, 1000 m, 1200 s, 1 min
