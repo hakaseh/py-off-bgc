@@ -1,4 +1,5 @@
 xarray 
+cartopy
 dask 
 distributed 
 netCDF4 

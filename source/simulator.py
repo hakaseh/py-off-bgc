@@ -121,7 +121,7 @@ class OfflineSimulator:
 
     def setup_io(self):
         self.ds_template = self.ds_t.isel(time=0).drop_vars('time')
-        self.out_dir = f"output/{self.bgc_model_choice}_{self.exp_name}"
+        self.out_dir = f"output/{self.exp_name}/{self.bgc_model_choice}"
         os.makedirs(self.out_dir, exist_ok=True)
         
     def setup_restoring(self):
@@ -155,7 +155,7 @@ class OfflineSimulator:
             wind_surf = np.nan_to_num(self.ds_wind.isel(time=day).values) 
             ice_surf = np.nan_to_num(self.ds_ice.isel(time=day).values)            
             
-            # 2. Calculate Density and MLD
+            # 2. Calculate potential density anomaly and MLD
             SA = gsw.SA_from_SP(s, self.p_3d, self.lon_2d, self.lat_2d)
             CT = gsw.CT_from_pt(SA, t)
             rho_3d = gsw.sigma0(SA, CT)
@@ -183,8 +183,11 @@ class OfflineSimulator:
                     
                     if self.mixing_method == "diffusion":
                         tr_mix = physics.diffusion_robust(tr_adv, k, self.dz_static, self.dt_phys)
+                    # testing the simplified KPP parameterization
                     elif self.mixing_method == "convective":
-                        tr_mix = physics.mixing_convective(tr_adv, rho_3d, self.dz_static, self.mld_threshold)
+                        k_kpp = physics.calculate_full_kz(self.mld_2d, rho_3d, self.dz_3d)
+                        tr_mix = physics.diffusion_robust(tr_adv, k_kpp, self.dz_static, self.dt_phys)
+                        #tr_mix = physics.mixing_convective(tr_adv, rho_3d, self.dz_static, self.mld_threshold)
                         
                     # CLAMP #1: Immediately after physics to fix advection overshoots
                     self.bgc_model.tracers[name][:] = np.maximum(tr_mix, 0.0)
@@ -233,7 +236,7 @@ class OfflineSimulator:
             
         ds_out = ds_out.expand_dims(time=[current_time])
         t_str = pd.to_datetime(current_time).strftime('%Y%m%d')
-        fname = f"{self.out_dir}/output_{self.bgc_model_choice}_{self.exp_name}_{t_str}.nc"
+        fname = f"{self.out_dir}/output_{self.exp_name}_{self.bgc_model_choice}_{t_str}.nc"
         
         if os.path.exists(fname):
             try: os.remove(fname)  
@@ -241,7 +244,7 @@ class OfflineSimulator:
                 print(f"  [Error] Cannot overwrite {fname}. Skipping save.")
                 return 
                 
-        comp = dict(zlib=True, complevel=5)
+        comp = dict(zlib=True, complevel=1)
         enc = {v: comp for v in ds_out.data_vars}
         ds_out.to_netcdf(fname, encoding=enc)
         

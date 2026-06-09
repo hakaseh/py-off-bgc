@@ -202,6 +202,58 @@ def advection_neumann(tracer, u, v, w, dz, dt, dx, dy, is_global=False):
     return tracer_new
 
 @njit(parallel=True, fastmath=True)
+def calculate_full_kz(mld_2d, rho_3d, dz_3d, k_mld_max=1e-2, k_bg_min=1e-6, k_deep_max=1e-4):    
+    """
+    Creates a full 3D Kz profile.
+    Inside MLD: Simplified KPP parabolic shape.
+    Below MLD: Stratification-dependent mixing (Inverse N^2).
+    """
+    nz, ny, nx = dz_3d.shape
+    kz_3d = np.zeros((nz, ny, nx))
+    
+    # Standard gravity and reference density for N^2
+    g = 9.81
+    rho_0 = 1035.0
+    
+    for j in prange(ny):
+        for i in range(nx):
+            mld = mld_2d[j, i]
+            
+            if np.isnan(mld) or dz_3d[0, j, i] < 1e-6:
+                kz_3d[:, j, i] = np.nan
+                continue
+                
+            current_depth = 0.0
+            
+            for k in range(nz):
+                dz = dz_3d[k, j, i]
+                current_depth += dz
+                
+                # --- REGION 1: INSIDE MLD (Simplified KPP) ---
+                if current_depth <= mld:
+                    sigma = current_depth / mld
+                    shape = sigma * (1.0 - sigma)**2
+                    kz_3d[k, j, i] = k_bg_min + (k_mld_max * 6.75 * shape)
+                
+                # --- REGION 2: BELOW MLD (Inverse Stratification) ---
+                else:
+                    # Calculate local N^2 (Buoyancy Frequency)
+                    if k < nz - 1:
+                        drho = rho_3d[k+1, j, i] - rho_3d[k, j, i]
+                        dz_eff = 0.5 * (dz_3d[k, j, i] + dz_3d[k+1, j, i])
+                        N2 = max((g / rho_0) * (drho / dz_eff), 1e-7)
+                    else:
+                        N2 = 1e-7 
+                    
+                    k_deep = 1e-7 / np.sqrt(N2)
+                    
+                    # UPDATED LINE: 
+                    # Clamp Kz between k_bg_min (floor) and k_deep_max (ceiling)
+                    kz_3d[k, j, i] = min(max(k_deep, k_bg_min), k_deep_max)
+                    
+    return kz_3d
+
+@njit(parallel=True, fastmath=True)
 def diffusion_robust(tracer, k_z, dz_3d, dt):
     """
     Robust Explicit Diffusion.

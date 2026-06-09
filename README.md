@@ -62,6 +62,13 @@ python -m run.run_goepr
 - NPZD based on Sasai et al. (2022)
 - NEMURO based on Kishi et al. (2007)
 
+### Adding a new BGC model
+
+* In `source/bgc_models/__init__.py`, add `from .nemuro import Model_NEMURO` and `"NEMURO": Model_NEMURO,`.
+* In `source/bgc_models`, add `nemuro.py`.
+* 
+
+
 ### Modify the BGC parameters
 By default, the model will run with the default set of parameter values declared in the source code. If you want to change these parameter values in your run, add the following to your **run.py** file:
 

@@ -17,11 +17,12 @@ def calculate_par(sw_surface, psum, dz):
     """
     Beer-Lambert Law for light attenuation.
     Shared by all models.
+    Uses a hard-coded light attenuation coefficients of 0.04 m-1 for water and 0.03 m2 mg-1 for chlorophyll
     """
     nz, ny, nx = dz.shape
     par = np.zeros((nz, ny, nx))
     
-    # Coefficients (Make sure these match your physics!)
+    # Coefficients
     k_water = 0.04
     k_phyto = 0.03
 
