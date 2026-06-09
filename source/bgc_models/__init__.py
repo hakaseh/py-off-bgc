@@ -5,6 +5,7 @@ from .npzd_sasai import Model_NPZD
 from .nemuro import Model_NEMURO
 from .no_sms import Model_NO_SMS
 from .fennel06 import Model_Fennel06
+from .flexpft import Model_FlexPFT
 # from .enemuro_yoshie import Model_eNEMURO       # Future models...
 
 # 2. Create a Registry (Dictionary mapping string names to Classes)
@@ -13,6 +14,7 @@ MODEL_REGISTRY = {
     "NEMURO": Model_NEMURO,
     "NO_SMS": Model_NO_SMS,
     "Fennel06": Model_Fennel06,
+    "FlexPFT": Model_FlexPFT,
     # "eNEMURO": Model_eNEMURO
 }
 
