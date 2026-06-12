@@ -24,6 +24,8 @@ class Model_NEMURO(BaseBGCModel):
             'ZPsi', 
             'silicate',
             'Opal',
+            'schl',
+            'lchl',
             'oxygen'
         ]
         self.tracers = {n: np.zeros((nz, ny, nx)) for n in self.names}
@@ -46,7 +48,7 @@ class Model_NEMURO(BaseBGCModel):
     def biology_step(self, t_curr, sw_curr, dz, dt):
         """Step biology forward."""
         # 1. Calc Shared PAR
-        psum = self.tracers['PSn'] + self.tracers['PLn']
+        psum = self.tracers['schl'] + self.tracers['lchl']
         par_3d = calculate_par(sw_curr, psum, dz)
 
         # 2. Unpack Params for Numba 
@@ -69,6 +71,8 @@ class Model_NEMURO(BaseBGCModel):
          self.tracers['ZPsi'],
          self.tracers['silicate'],
          self.tracers['Opal'],
+         self.tracers['schl'],
+         self.tracers['lchl'],            
          self.tracers['oxygen']
         ) = self._run_kernel(
             self.tracers['PSn'], 
@@ -85,6 +89,8 @@ class Model_NEMURO(BaseBGCModel):
             self.tracers['ZPsi'],
             self.tracers['silicate'],
             self.tracers['Opal'],
+            self.tracers['schl'],
+            self.tracers['lchl'],
             self.tracers['oxygen'],
             t_curr, par_3d, dz, dt,
             # Parameters (Explicitly passed)
@@ -157,7 +163,11 @@ class Model_NEMURO(BaseBGCModel):
             p.p_kp2si,
             p.p_rsinpl,
             p.p_setvp,
-            p.p_setvo
+            p.p_setvo,
+            p.p_thetas,
+            p.p_thetal,
+            p.p_alphas,
+            p.p_alphal
          )
         return par_3d
     
@@ -178,6 +188,8 @@ class Model_NEMURO(BaseBGCModel):
         ZPsi, 
         silicate,
         Opal, 
+        schl,
+        lchl,
         oxygen,
         temp, par, dz, dt,
         # Parameters as arguments
@@ -250,7 +262,11 @@ class Model_NEMURO(BaseBGCModel):
         p_kp2si,
         p_rsinpl,
         p_setvp,
-        p_setvo
+        p_setvo,
+        p_thetas,
+        p_thetal,
+        p_alphas,
+        p_alphal
     ):
 
         nz, ny, nx = nitrate.shape
@@ -274,6 +290,8 @@ class Model_NEMURO(BaseBGCModel):
         ZPsi_n = np.zeros_like(nitrate)
         silicate_n = np.zeros_like(nitrate)
         Opal_n = np.zeros_like(nitrate)
+        schl_n = np.zeros_like(nitrate)
+        lchl_n = np.zeros_like(nitrate)
         oxygen_n = np.zeros_like(nitrate)
     
         for j in prange(ny):
@@ -298,6 +316,8 @@ class Model_NEMURO(BaseBGCModel):
                     ZPsi_c = ZPsi[k, j, i]
                     silicate_c = silicate[k, j, i]
                     Opal_c = Opal[k, j, i]  
+                    schl_c = schl[k, j, i]  
+                    lchl_c = lchl[k, j, i]  
                     oxygen_c = oxygen[k, j, i]                
  
                     temp_c = temp[k, j, i]
@@ -315,7 +335,7 @@ class Model_NEMURO(BaseBGCModel):
                     # f-ratio of small phytoplankton
                     RnewS = nitrate_c/(nitrate_c + p_kno3s)*np.exp(-p_this*ammonium_c
                         )/(nitrate_c/(nitrate_c + p_kno3s)*np.exp(-p_this*ammonium_c)
-                        +ammonium_c/(ammonium_c+p_knh4s) + 1e-16)
+                        +ammonium_c/(ammonium_c+p_knh4s) + 1e-12)
                     # (2) Gross Primary Production rate of large phytoplankton                    
                     GppPLn = p_vmaxl * min(
                         nitrate_c/(nitrate_c+p_kno3l)
@@ -327,7 +347,7 @@ class Model_NEMURO(BaseBGCModel):
                     # f-ratio of large phytoplankton
                     RnewL = nitrate_c/(nitrate_c + p_kno3l)*np.exp(-p_thil*ammonium_c
                         )/(nitrate_c/(nitrate_c + p_kno3l)*np.exp(-p_thil*ammonium_c)
-                        +ammonium_c/(ammonium_c+p_knh4l) + 1e-16)
+                        +ammonium_c/(ammonium_c+p_knh4l) + 1e-12)
                     # (3) Respiration rate of small phytoplankton
                     ResPSn = p_resps0*np.exp(p_kresps*temp_c) * PSn_c
                     # (4) Respiration rate of large phytoplankton
@@ -418,8 +438,7 @@ class Model_NEMURO(BaseBGCModel):
                     DecP2Si = p_vp2si0 * np.exp(p_kp2si * temp_c) * Opal_c
                     # (39) Sedimentation rate of Opal [sinking?]
                     ### Computed elsewhere
-    
-                    
+                
                     # --- E. DERIVATIVES ---
                     
                     # A.1. Nitrogen (suffix n is added for nitrogen flow of compartments and of each process)
@@ -439,6 +458,12 @@ class Model_NEMURO(BaseBGCModel):
                     d_ZPsi = GraPL2ZPsi - EgeZPsi
                     d_silicate = - GppPLsi + ResPLsi + ExcPLsi + DecP2Si
                     d_Opal = MorPLsi + EgeZLsi + EgeZPsi - DecP2Si
+
+                    # Chlorophyll-a (new in py-off-bgc) is based on Fennel et al. (2006), which is based on Geider et al. (1996, 1997)
+                    # simply adapting Eq 9 of Fennel et al. 2006 to NEMURO.
+                    d_schl = p_thetas * GppPSn**2 / (PSn_c + 1e-12) / (p_alphas * par_c + 1e-12) - (ResPSn + MorPSn + ExcPSn + GraPS2ZSn + GraPS2ZLn) / (PSn_c + 1e-12) * schl_c
+                    d_lchl = p_thetal * GppPLn**2 / (PLn_c + 1e-12) / (p_alphal * par_c + 1e-12) - (ResPLn + MorPLn + ExcPLn + GraPL2ZLn + GraPL2ZPn) / (PLn_c + 1e-12) * lchl_c                    
+                    
                     d_oxygen = - 172.0 / 16.0 * (d_nitrate + d_ammonium + Nit)
                     
                     # --- F. UPDATE ---
@@ -456,9 +481,11 @@ class Model_NEMURO(BaseBGCModel):
                     ZPsi_n[k, j, i] = ZPsi_c + d_ZPsi * dt_day
                     silicate_n[k, j, i] = silicate_c + d_silicate * dt_day
                     Opal_n[k, j, i] = Opal_c + d_Opal * dt_day
+                    schl_n[k, j, i] = schl_c + d_schl * dt_day
+                    lchl_n[k, j, i] = lchl_c + d_lchl * dt_day                    
                     oxygen_n[k, j, i] = oxygen_c + d_oxygen * dt_day
         
-        return PSn_n, PLn_n, ZSn_n, ZLn_n, ZPn_n, nitrate_n, ammonium_n, PON_n, DON_n, PLsi_n, ZLsi_n, ZPsi_n, silicate_n, Opal_n, oxygen_n
+        return PSn_n, PLn_n, ZSn_n, ZLn_n, ZPn_n, nitrate_n, ammonium_n, PON_n, DON_n, PLsi_n, ZLsi_n, ZPsi_n, silicate_n, Opal_n, schl_n, lchl_n, oxygen_n
 
 @dataclass
 class Params_BGC:
@@ -543,3 +570,7 @@ class Params_BGC:
     p_rsinpl: float = 2.0 # Si:N ratio of plankton
     p_setvp: float = 40
     p_setvo: float = 40
+    p_thetas: float = 0.0328 # Table S1, Laurent et al. 2021
+    p_thetal: float = 0.0386 # Table S1, Laurent et al. 2021
+    p_alphas: float = 0.0405 # Table S1, Laurent et al. 2021
+    p_alphal: float = 0.0393 # Table S1, Laurent et al. 2021

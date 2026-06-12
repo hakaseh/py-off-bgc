@@ -10,7 +10,7 @@ Fennel et al. (2006): Nitrogen cycling in the MidAtlantic Bight and implications
 For code adaptation, I followed https://github.com/bwang63/gotm-fabm-memg-biogeochemical-model/blob/main/bio_fennel/1p1z.F90
 """
 
-class Model_Fennel06(BaseBGCModel):
+class Model_FENNEL06(BaseBGCModel):
     def __init__(self, nz, ny, nx, water_mask, params=None):
         super().__init__(nz, ny, nx, water_mask)
         

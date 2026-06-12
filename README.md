@@ -60,13 +60,14 @@ python -m run.run_goepr
 ## Supported BGC models
 
 - NPZD based on Sasai et al. (2022)
+- N1P1 based on Fennel et al. (2006)
+- FlexPFT based on Kerimoglu et al. (2023)
 - NEMURO based on Kishi et al. (2007)
 
 ### Adding a new BGC model
 
 * In `source/bgc_models/__init__.py`, add `from .nemuro import Model_NEMURO` and `"NEMURO": Model_NEMURO,`.
 * In `source/bgc_models`, add `nemuro.py`.
-* 
 
 
 ### Modify the BGC parameters

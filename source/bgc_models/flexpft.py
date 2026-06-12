@@ -16,10 +16,14 @@ class Model_FlexPFT(BaseBGCModel):
         
         # 1. Setup Tracers
         self.names = [
-            'phyc', 'phyn',
-            'dic', 'nitrate',
-            'doc', 'don',
-            'detc', 'detn',
+            'phyc', 
+            'phyn',
+            'dic', 
+            'nitrate',
+            'doc', 
+            'don',
+            'detc', 
+            'detn',
             'chl',
             'oxygen'
         ]
@@ -112,13 +116,15 @@ class Model_FlexPFT(BaseBGCModel):
     @staticmethod
     @njit(parallel=True, fastmath=True)
     def _run_kernel(
-        nitrate, 
-        ammonium,
-        phy,
+        phyc, 
+        phyn,
+        dic, 
+        nitrate,
+        doc, 
+        don,
+        detc, 
+        detn,
         chl,
-        zoo,
-        sdet, 
-        ldet,
         oxygen,
         temp, par, dz, dt,
         # Parameters as arguments
