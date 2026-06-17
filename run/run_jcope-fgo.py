@@ -8,13 +8,13 @@ from source.simulator import OfflineSimulator
 # --- 1. CONFIGURATION ---
 exp_name = "JCOPE-FGO"
 bgc_model_choice = "NEMURO"
-dt_in_sec = 1800
-mld_choice = 0.03 
+dt_in_sec = 900
+mld_choice = 0.03
 sponge_choice = 1
 tau_lateral_choice = 86400.0 * 1
 tau_bottom_choice = 86400.0 * 30
 is_global_choice = False
-restart_file = None #f"output/{bgc_model_choice}_{exp_name}/restart.nc"
+restart_file = None #f"output/{exp_name}/{bgc_model_choice}/restart.nc"
 clim_file = f"climatology/{exp_name}/GLODAPv2.2016b.ALL_{exp_name}.nc"
 
 # Domain Slicing

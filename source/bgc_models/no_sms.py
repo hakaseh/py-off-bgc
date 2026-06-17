@@ -30,15 +30,17 @@ class Model_NO_SMS(BaseBGCModel):
 
         return par_3d
     
+
     @staticmethod
-    @njit(parallel=True, fastmath=True)
+    @njit(fastmath=True) # Removed parallel=True since there are no loops
     def _run_kernel(
         nitrate, 
         temp, par, dz, dt,
         p_no_sms,
     ):
-                
-        nitrate_n = nitrate           
+        
+        # Create a true, independent copy of the array for the next time step
+        nitrate_n = nitrate.copy()            
         
         return nitrate_n
 

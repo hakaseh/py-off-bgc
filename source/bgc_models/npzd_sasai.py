@@ -55,6 +55,7 @@ class Model_NPZD(BaseBGCModel):
          )
         return par_3d
     
+
     @staticmethod
     @njit(parallel=True, fastmath=True)
     def _run_kernel(nitrate, phy, zoo, det, oxygen, temp, par, dz, dt,
@@ -65,64 +66,74 @@ class Model_NPZD(BaseBGCModel):
 
         nz, ny, nx = nitrate.shape
         
-        # Time conversion (dt expressed in day, which is easy to deal with because
-        # BGC parameters are often expressed in per day)
+        # Time conversion (dt expressed in day)
         dt_day = dt / 86400.0
         
         # Initialize Outputs
-        nitrate_new = np.zeros_like(nitrate)
-        phy_new = np.zeros_like(phy)
-        zoo_new  = np.zeros_like(zoo)
-        det_new  = np.zeros_like(det)
-        oxygen_new  = np.zeros_like(oxygen)
+        # Using .copy() instead of zeros_like to preserve masked/land values untouched
+        nitrate_new = nitrate.copy()
+        phy_new = phy.copy()
+        zoo_new  = zoo.copy()
+        det_new  = det.copy()
+        oxygen_new  = oxygen.copy()
     
-        for j in prange(ny):
-            for i in range(nx):
-                if dz[0, j, i] <= 1e-6: continue
+        # 1. Calculate total number of horizontal grid points
+        n_points = ny * nx
+
+        # 2. Single flattened loop for OpenMP thread distribution
+        for p in prange(n_points):
+            # 3. Reconstruct 2D spatial indices (j, i)
+            j = p // nx
+            i = p % nx
+            
+            if dz[0, j, i] <= 1e-6: 
+                continue
     
-                for k in range(nz):
-                    if dz[k, j, i] <= 1e-6: continue
+            for k in range(nz):
+                if dz[k, j, i] <= 1e-6: 
+                    continue
                     
-                    # Load State
-                    nitrate_cell = nitrate[k, j, i]
-                    phy_cell  = phy[k, j, i]
-                    zoo_cell  = zoo[k, j, i]
-                    det_cell  = det[k, j, i]
-                    oxygen_cell  = oxygen[k, j, i]
-                    temp_cell   = temp[k, j, i]
-                    par_cell = par[k, j, i]                
-                    
-                    # --- D. SOURCES / SINKS ---
-                    # Realized Growth Rate
-                    lim_tem = np.exp(-p_act/p_gas*(1.0/(temp_cell+273.15)-1.0/(p_ref+273.15)))
-                    lim_lig = 1.0 - np.exp(-p_ini*p_the*par_cell/p_gro/lim_tem)
-                    r_gro = p_gro * nitrate_cell / (
-                        nitrate_cell + p_upt/p_aff + 
-                        2*np.sqrt(p_upt*nitrate_cell/p_aff)
-                    ) * lim_lig * lim_tem * phy_cell
-                    r_pre = p_res * phy_cell
-                    r_pmo = p_pmo * phy_cell * phy_cell
-                    r_pex = p_exc * r_gro
-                    r_gra = p_gra * (1.0 - np.exp(p_ivl*(p_p2z-phy_cell))) * zoo_cell
-                    r_zmo = p_zmo * zoo_cell * zoo_cell
-                    r_dec = p_dec * det_cell
+                # Load State
+                nitrate_cell = nitrate[k, j, i]
+                phy_cell  = phy[k, j, i]
+                zoo_cell  = zoo[k, j, i]
+                det_cell  = det[k, j, i]
+                oxygen_cell  = oxygen[k, j, i]
+                temp_cell   = temp[k, j, i]
+                par_cell = par[k, j, i]                
+                
+                # --- D. SOURCES / SINKS ---
+                # Realized Growth Rate
+                lim_tem = np.exp(-p_act/p_gas*(1.0/(temp_cell+273.15)-1.0/(p_ref+273.15)))
+                lim_lig = 1.0 - np.exp(-p_ini*p_the*par_cell/p_gro/lim_tem)
+                r_gro = p_gro * nitrate_cell / (
+                    nitrate_cell + p_upt/p_aff + 
+                    2.0*np.sqrt(p_upt*nitrate_cell/p_aff)
+                ) * lim_lig * lim_tem * phy_cell
+                
+                r_pre = p_res * phy_cell
+                r_pmo = p_pmo * phy_cell * phy_cell
+                r_pex = p_exc * r_gro
+                r_gra = p_gra * (1.0 - np.exp(p_ivl*(p_p2z-phy_cell))) * zoo_cell
+                r_zmo = p_zmo * zoo_cell * zoo_cell
+                r_dec = p_dec * det_cell
     
-                    
-                    # --- E. DERIVATIVES ---
-                    
-                    d_nitrate = - r_gro + r_pre + r_pex + (p_aef - p_gef)*r_gra + r_dec
-                    d_phy = r_gro - r_pre - r_pmo - r_pex - r_gra
-                    d_zoo = r_gra - (p_aef - p_gef)*r_gra - (1 - p_aef)*r_gra - r_zmo
-                    # sinking is done in anotehr routine
-                    d_det = r_pmo + (1.0 - p_aef)*r_gra + r_zmo - r_dec
-                    d_oxygen = - 172.0 / 16.0 * d_nitrate
-                    
-                    # --- F. UPDATE ---
-                    nitrate_new[k, j, i] = nitrate_cell + d_nitrate * dt_day
-                    phy_new[k, j, i] = phy_cell + d_phy * dt_day
-                    zoo_new[k, j, i] = zoo_cell + d_zoo * dt_day
-                    det_new[k, j, i] = det_cell + d_det * dt_day
-                    oxygen_new[k, j, i] = oxygen_cell + d_oxygen * dt_day
+                
+                # --- E. DERIVATIVES ---
+                
+                d_nitrate = - r_gro + r_pre + r_pex + (p_aef - p_gef)*r_gra + r_dec
+                d_phy = r_gro - r_pre - r_pmo - r_pex - r_gra
+                d_zoo = r_gra - (p_aef - p_gef)*r_gra - (1.0 - p_aef)*r_gra - r_zmo
+                # sinking is done in another routine
+                d_det = r_pmo + (1.0 - p_aef)*r_gra + r_zmo - r_dec
+                d_oxygen = - 172.0 / 16.0 * d_nitrate
+                
+                # --- F. UPDATE ---
+                nitrate_new[k, j, i] = nitrate_cell + d_nitrate * dt_day
+                phy_new[k, j, i] = phy_cell + d_phy * dt_day
+                zoo_new[k, j, i] = zoo_cell + d_zoo * dt_day
+                det_new[k, j, i] = det_cell + d_det * dt_day
+                oxygen_new[k, j, i] = oxygen_cell + d_oxygen * dt_day
         
         return nitrate_new, phy_new, zoo_new, det_new, oxygen_new
 

@@ -100,193 +100,175 @@ class Model_FENNEL06(BaseBGCModel):
          )
         return par_3d
     
+
     @staticmethod
     @njit(parallel=True, fastmath=True)
     def _run_kernel(
-        nitrate, 
-        ammonium,
-        phy,
-        chl,
-        zoo,
-        sdet, 
-        ldet,
-        oxygen,
+        nitrate, ammonium, phy, chl, zoo, sdet, ldet, oxygen,
         temp, par, dz, dt,
         # Parameters as arguments
-        p_i_thnh4,
-        p_d_p5nh4,
-        p_nitrir,
-        p_k_no3,
-        p_k_nh4,
-        p_vp0,
-        p_k_phy,
-        p_phycn,
-        p_phyis,
-        p_phymr,
-        p_chl2c_m,
-        p_zooae_n,
-        p_zoobm,
-        p_zooer,
-        p_zoogr,
-        p_zoomr,
-        p_zoocn,
-        p_lderrn,
-        p_sderrn,
-        p_coagr,
-        p_wp,
-        p_ws,
-        p_wl
+        p_i_thnh4, p_d_p5nh4, p_nitrir, p_k_no3, p_k_nh4, p_vp0,
+        p_k_phy, p_phycn, p_phyis, p_phymr, p_chl2c_m, p_zooae_n,
+        p_zoobm, p_zooer, p_zoogr, p_zoomr, p_zoocn, p_lderrn,
+        p_sderrn, p_coagr, p_wp, p_ws, p_wl
     ):
 
         nz, ny, nx = nitrate.shape
         
-        # Time conversion (dt expressed in day, which is easy to deal with because
-        # BGC parameters are often expressed in per day)
+        # Time conversion (dt expressed in day)
         dt_day = dt / 86400.0
         eps = 1e-12
         
         # Initialize Outputs (_n for next time step)
-        nitrate_n = np.zeros_like(nitrate)
-        ammonium_n = np.zeros_like(nitrate)
-        phy_n = np.zeros_like(nitrate)
-        chl_n = np.zeros_like(nitrate)
-        zoo_n = np.zeros_like(nitrate)
-        sdet_n = np.zeros_like(nitrate)
-        ldet_n = np.zeros_like(nitrate)
-        oxygen_n = np.zeros_like(nitrate)
+        # Using .copy() instead of zeros_like to preserve masked/land values untouched
+        nitrate_n = nitrate.copy()
+        ammonium_n = ammonium.copy()
+        phy_n = phy.copy()
+        chl_n = chl.copy()
+        zoo_n = zoo.copy()
+        sdet_n = sdet.copy()
+        ldet_n = ldet.copy()
+        oxygen_n = oxygen.copy()
     
-        for j in prange(ny):
-            for i in range(nx):
-                if dz[0, j, i] <= 1e-6: continue
+        # 1. Calculate total number of horizontal grid points
+        n_points = ny * nx
+        
+        # 2. Single flattened loop for OpenMP thread distribution
+        for p in prange(n_points):
+            # 3. Reconstruct 2D spatial indices (j, i)
+            j = p // nx
+            i = p % nx
+            
+            if dz[0, j, i] <= 1e-6: 
+                continue
     
-                for k in range(nz):
-                    if dz[k, j, i] <= 1e-6: continue
+            for k in range(nz):
+                if dz[k, j, i] <= 1e-6: 
+                    continue
                     
-                    # Load State (_c for current time step)
-                    nitrate_c = nitrate[k, j, i]
-                    ammonium_c = ammonium[k, j, i]
-                    phy_c = phy[k, j, i]
-                    chl_c = chl[k, j, i]
-                    zoo_c = zoo[k, j, i]
-                    sdet_c = sdet[k, j, i]
-                    ldet_c = ldet[k, j, i]
-                    oxygen_c = oxygen[k, j, i]                
- 
-                    temp_c = temp[k, j, i]
-                    par_c = par[k, j, i]                
-                    
-                    # --- D. SOURCES / SINKS ---
-                    #? if par_c > 0:
-                    # chl-to-carbon ratio
-                    cff = p_phycn * 12
-                    chl2c = min(chl_c/(phy_c*cff+eps), p_chl2c_m)
+                # Load State (_c for current time step)
+                nitrate_c = nitrate[k, j, i]
+                ammonium_c = ammonium[k, j, i]
+                phy_c = phy[k, j, i]
+                chl_c = chl[k, j, i]
+                zoo_c = zoo[k, j, i]
+                sdet_c = sdet[k, j, i]
+                ldet_c = ldet[k, j, i]
+                oxygen_c = oxygen[k, j, i]                
+                
+                temp_c = temp[k, j, i]
+                par_c = par[k, j, i]                
+                
+                # --- D. SOURCES / SINKS ---
+                
+                # chl-to-carbon ratio
+                cff = p_phycn * 12.0
+                chl2c = min(chl_c/(phy_c*cff+eps), p_chl2c_m)
 
-                    # temperature- and light-limited growth rate (Eppley 1972)
-                    vp = p_vp0 * 0.59 * (1.066 ** temp_c)
-                    fac1 = par_c * p_phyis
-                    epp = vp / np.sqrt(vp*vp + fac1*fac1)
-                    t_ppmax = epp * fac1
+                # temperature- and light-limited growth rate (Eppley 1972)
+                vp = p_vp0 * 0.59 * (1.066 ** temp_c)
+                fac1 = par_c * p_phyis
+                epp = vp / np.sqrt(vp*vp + fac1*fac1)
+                t_ppmax = epp * fac1
 
-                    # nutrient-limitation (Parker 1993)
-                    cff1 = ammonium_c * p_k_nh4
-                    cff2 = nitrate_c * p_k_no3
-                    inhnh4 = 1 / (1+cff1)
-                    l_nh4 = cff1 / (1+cff1)
-                    l_no3 = cff2 * inhnh4 / (1 + cff2)
-                    ltot = l_no3 + l_nh4
+                # nutrient-limitation (Parker 1993)
+                cff1 = ammonium_c * p_k_nh4
+                cff2 = nitrate_c * p_k_no3
+                inhnh4 = 1.0 / (1.0 + cff1)
+                l_nh4 = cff1 / (1.0 + cff1)
+                l_no3 = cff2 * inhnh4 / (1.0 + cff2)
+                ltot = l_no3 + l_nh4
 
-                    # nitrate and ammonium uptake by phytoplankton
-                    fac1 = t_ppmax # In py-off-bgc, no need to convert from per day to second
-                    cff4 = fac1 * p_k_no3 * inhnh4 / (1 + cff2) * phy_c
-                    cff5 = fac1 * p_k_nh4 / (1 + cff1) * phy_c
+                # nitrate and ammonium uptake by phytoplankton
+                fac1 = t_ppmax 
+                cff4 = fac1 * p_k_no3 * inhnh4 / (1.0 + cff2) * phy_c
+                cff5 = fac1 * p_k_nh4 / (1.0 + cff1) * phy_c
 
-                    # In py-off-bgc, we do not follow the implicit method as described in https://github.com/bwang63/gotm-fabm-memg-biogeochemical-model/blob/main/bio_fennel/1p1z.F90#L379
-                    n_newprod = nitrate_c * cff4
-                    n_regprod = ammonium_c * cff5
+                n_newprod = nitrate_c * cff4
+                n_regprod = ammonium_c * cff5
 
-                    chl_prod = (t_ppmax*t_ppmax*ltot*ltot*p_chl2c_m*chl_c
-                               ) / (p_phyis * max(chl2c, eps) * par_c + eps)
+                chl_prod = (t_ppmax*t_ppmax*ltot*ltot*p_chl2c_m*chl_c
+                           ) / (p_phyis * max(chl2c, eps) * par_c + eps)
 
-                    # nitrification (nh4 --> no3, Olson 1981)
-                    fac2 = max(oxygen_c, 0)
-                    fac3 = max(fac2 / (3 + fac2), 0)
-                    fac1 = p_nitrir * fac3
+                # nitrification (nh4 --> no3, Olson 1981)
+                fac2 = max(oxygen_c, 0.0)
+                fac3 = max(fac2 / (3.0 + fac2), 0.0)
+                fac1 = p_nitrir * fac3
 
-                    cff1 = (par_c - p_i_thnh4) / (p_d_p5nh4 + par_c - 2 * p_i_thnh4)
-                    cff2 = 1 - max(cff1, 0)
-                    cff3 = fac1 * cff2
-                    n_nitrifi = ammonium_c * cff3
+                cff1 = (par_c - p_i_thnh4) / (p_d_p5nh4 + par_c - 2.0 * p_i_thnh4)
+                cff2 = 1.0 - max(cff1, 0.0)
+                cff3 = fac1 * cff2
+                n_nitrifi = ammonium_c * cff3
 
-                    # if no light, no phyto growth and nitrification occurs at max rate
-                    if par_c == 0:
-                        n_newprod = 0
-                        n_regprod = 0
-                        chl_prod = 0
+                # if no light, no phyto growth and nitrification occurs at max rate
+                if par_c == 0.0:
+                    n_newprod = 0.0
+                    n_regprod = 0.0
+                    chl_prod = 0.0
 
-                    # zooplankton grazing (Landry 1993)
-                    fac1 = p_zoogr
-                    cff2 = p_phymr
-                    cff1 = fac1 * zoo_c * phy_c / (p_k_phy + phy_c * phy_c)
-                    cff3 = 1 / (1 + cff1)
-                    n_graz = cff1 * phy_c
-                    chl_graz = cff1 * chl_c
+                # zooplankton grazing (Landry 1993)
+                fac1 = p_zoogr
+                cff2 = p_phymr
+                cff1 = fac1 * zoo_c * phy_c / (p_k_phy + phy_c * phy_c)
+                n_graz = cff1 * phy_c
+                chl_graz = cff1 * chl_c
 
-                    n_assim = cff1 * phy_c * p_zooae_n
-                    n_egest = cff1 * phy_c * (1 - p_zooae_n)
-                    # phyto mortality (i hard-coded the min concentration)
-                    n_pmortal = cff2 * max(phy_c - 1e-6, 0)
-                    chl_pmortal = cff2 * max(chl_c - 1e-6, 0)
+                n_assim = cff1 * phy_c * p_zooae_n
+                n_egest = cff1 * phy_c * (1.0 - p_zooae_n)
+                
+                # phyto mortality
+                n_pmortal = cff2 * max(phy_c - 1e-6, 0.0)
+                chl_pmortal = cff2 * max(chl_c - 1e-6, 0.0)
 
-                    # zoo loss terms
-                    cff1 = p_zoobm
-                    fac2 = p_zoomr
-                    fac3 = p_zooer
-                    fac1 = fac3 * phy_c * phy_c / (p_k_phy + phy_c * phy_c)
-                    cff2 = fac2 * zoo_c
-                    cff3 = fac1 * p_zooae_n
+                # zoo loss terms
+                cff1 = p_zoobm
+                fac2 = p_zoomr
+                fac3 = p_zooer
+                fac1 = fac3 * phy_c * phy_c / (p_k_phy + phy_c * phy_c)
+                cff2 = fac2 * zoo_c
+                cff3 = fac1 * p_zooae_n
 
-                    n_zmortal = cff2 * zoo_c
-                    n_zexcret = cff3 * zoo_c
-                    n_zmetabo = cff1 * max(zoo_c - 1e-6, 0)
+                n_zmortal = cff2 * zoo_c
+                n_zexcret = cff3 * zoo_c
+                n_zmetabo = cff1 * max(zoo_c - 1e-6, 0.0)
 
-                    # coagulation of phy and sdet to ldet
-                    fac1 = p_coagr
-                    cff1 = fac1 * (sdet_c + phy_c)
-                    cff2 = 1 / (1 + cff1)
-                    n_coagp = phy_c * cff1
-                    chl_coag = chl_c * cff1
-                    n_coagd = sdet_c * cff1
+                # coagulation of phy and sdet to ldet
+                fac1 = p_coagr
+                cff1 = fac1 * (sdet_c + phy_c)
+                n_coagp = phy_c * cff1
+                chl_coag = chl_c * cff1
+                n_coagd = sdet_c * cff1
 
-                    # remineralization
-                    fac1 = max(oxygen_c - 6, 0)
-                    fac2 = max(fac1 / (3 + fac1), 0)
-                    cff1 = p_sderrn * fac2
-                    cff3 = p_lderrn * fac2
-                    n_remines = sdet_c * cff1
-                    n_reminel = ldet_c * cff3
+                # remineralization
+                fac1 = max(oxygen_c - 6.0, 0.0)
+                fac2 = max(fac1 / (3.0 + fac1), 0.0)
+                cff1 = p_sderrn * fac2
+                cff3 = p_lderrn * fac2
+                n_remines = sdet_c * cff1
+                n_reminel = ldet_c * cff3
 
-                    # --- E. DERIVATIVES ---
-                    
-                    d_nitrate = - n_newprod + n_nitrifi
-                    d_ammonium = - n_regprod - n_nitrifi + n_zmetabo + n_zexcret + n_remines + n_reminel
-                    d_phy = n_newprod + n_regprod - n_graz - n_pmortal - n_coagp
-                    d_chl = chl_prod - chl_graz - chl_pmortal - chl_coag
-                    d_zoo = n_assim - n_zmortal - n_zexcret - n_zmetabo
-                    d_sdet = n_egest + n_pmortal + n_zmortal - n_coagd - n_remines
-                    d_ldet = n_coagp + n_coagd - n_reminel
-                    # https://github.com/bwang63/gotm-fabm-memg-biogeochemical-model/blob/main/bio_fennel/oxygen.F90#L143
-                    # HH: why not combine the last two terms given the same C:N ratio?
-                    d_oxygen = n_newprod * 8.625 + n_regprod * 6.625 - 2 * n_nitrifi - 6.625 * (n_zmetabo + n_zexcret) - 6.625 * (n_remines + n_reminel) 
-                    
-                    # --- F. UPDATE ---
-                    nitrate_n[k, j, i] = nitrate_c + d_nitrate * dt_day
-                    ammonium_n[k, j, i] = ammonium_c + d_ammonium * dt_day
-                    phy_n[k, j, i] = phy_c + d_phy * dt_day
-                    chl_n[k, j, i] = chl_c + d_chl * dt_day
-                    zoo_n[k, j, i] = zoo_c + d_zoo * dt_day
-                    sdet_n[k, j, i] = sdet_c + d_sdet * dt_day
-                    ldet_n[k, j, i] = ldet_c + d_ldet * dt_day
-                    oxygen_n[k, j, i] = oxygen_c + d_oxygen * dt_day
+                # --- E. DERIVATIVES ---
+                
+                d_nitrate = - n_newprod + n_nitrifi
+                d_ammonium = - n_regprod - n_nitrifi + n_zmetabo + n_zexcret + n_remines + n_reminel
+                d_phy = n_newprod + n_regprod - n_graz - n_pmortal - n_coagp
+                d_chl = chl_prod - chl_graz - chl_pmortal - chl_coag
+                d_zoo = n_assim - n_zmortal - n_zexcret - n_zmetabo
+                d_sdet = n_egest + n_pmortal + n_zmortal - n_coagd - n_remines
+                d_ldet = n_coagp + n_coagd - n_reminel
+                
+                # Combining the last two terms given the same C:N ratio as suggested in your comment
+                d_oxygen = n_newprod * 8.625 + n_regprod * 6.625 - 2.0 * n_nitrifi - 6.625 * (n_zmetabo + n_zexcret + n_remines + n_reminel) 
+                
+                # --- F. UPDATE ---
+                nitrate_n[k, j, i] = nitrate_c + d_nitrate * dt_day
+                ammonium_n[k, j, i] = ammonium_c + d_ammonium * dt_day
+                phy_n[k, j, i] = phy_c + d_phy * dt_day
+                chl_n[k, j, i] = chl_c + d_chl * dt_day
+                zoo_n[k, j, i] = zoo_c + d_zoo * dt_day
+                sdet_n[k, j, i] = sdet_c + d_sdet * dt_day
+                ldet_n[k, j, i] = ldet_c + d_ldet * dt_day
+                oxygen_n[k, j, i] = oxygen_c + d_oxygen * dt_day
         
         return nitrate_n, ammonium_n, phy_n, chl_n, zoo_n, sdet_n, ldet_n, oxygen_n
 

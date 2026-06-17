@@ -7,7 +7,7 @@ from source.simulator import OfflineSimulator
 from source.bgc_models.npzd_sasai import Params_BGC
 
 # --- 1. CONFIGURATION ---
-exp_name = "OFES2_NP10"
+exp_name = "OFES2-NP10"
 bgc_model_choice = "NPZD"
 dt_in_sec = 600.0
 mld_choice = 0.03 
@@ -15,7 +15,7 @@ sponge_choice = 1
 tau_lateral_choice = 86400.0 * 1
 tau_bottom_choice = 86400.0 * 30
 is_global_choice = False
-restart_file = f"../input/{exp_name}/restart_{exp_name}_20180101.nc"
+restart_file = f"input/{exp_name}/restart_{exp_name}_20180101.nc"
 clim_file = None #f"climatology/{exp_name}/GLODAPv2.2016b.ALL_{exp_name}.nc"
 
 # Domain Slicing
@@ -26,12 +26,12 @@ time_range  = slice(None, None) #"20160101", "20161231")
 
 # --- 2. LOAD PHYSICAL DATA (CMEMS SPECIFIC) ---
 print("Loading raw datasets...")
-ds_t = xr.open_dataset(f'../input/{exp_name}/temp.nc')['temp']
-ds_s = xr.open_dataset(f'../input/{exp_name}/salinity.nc')['salinity']
+ds_t = xr.open_dataset(f'input/{exp_name}/temp.nc')['temp']
+ds_s = xr.open_dataset(f'input/{exp_name}/salinity.nc')['salinity']
 # divide by 100 to convert from cm/s to m/s
-ds_u = 1e-2 * xr.open_dataset(f'../input/{exp_name}/u.nc')['u']
-ds_v = 1e-2 * xr.open_dataset(f'../input/{exp_name}/v.nc')['v']
-ds_sw = xr.open_dataset(f'../input/{exp_name}/rsds_JRA55-do-1-6-0_OFES2_NP10_2018.nc')['rsds']
+ds_u = 1e-2 * xr.open_dataset(f'input/{exp_name}/u.nc')['u']
+ds_v = 1e-2 * xr.open_dataset(f'input/{exp_name}/v.nc')['v']
+ds_sw = xr.open_dataset(f'input/{exp_name}/rsds_JRA55-do-1-6-0_OFES2_NP10_2018.nc')['rsds']
 
 # Optional input
 ds_wind = None

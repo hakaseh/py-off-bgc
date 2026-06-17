@@ -21,6 +21,7 @@ def haversine_dist(lon1, lat1, lon2, lat2):
     
     return R * c
 
+
 @njit(parallel=True, fastmath=True)
 def calculate_metrics_curvilinear(lon_2d, lat_2d):
     """
@@ -32,31 +33,44 @@ def calculate_metrics_curvilinear(lon_2d, lat_2d):
     dx = np.zeros((ny, nx))
     dy = np.zeros((ny, nx))
     
-    for j in prange(ny):
-        for i in range(nx):
-            # --- DX (Distance along I-axis) ---
-            # Distance from (j,i) to (j, i+1)
-            # Boundary: Use previous cell's width at the edge
-            if i < nx - 1:
-                dist = haversine_dist(lon_2d[j, i], lat_2d[j, i], 
-                                      lon_2d[j, i+1], lat_2d[j, i+1])
-                dx[j, i] = dist
-            else:
-                dx[j, i] = dx[j, i-1] # Copy edge
-                
-            # --- DY (Distance along J-axis) ---
-            # Distance from (j,i) to (j+1, i)
-            if j < ny - 1:
-                dist = haversine_dist(lon_2d[j, i], lat_2d[j, i], 
-                                      lon_2d[j+1, i], lat_2d[j+1, i])
-                dy[j, i] = dist
-            else:
-                dy[j, i] = dy[j, i-1] # Copy edge
-                
-    # Safety: Avoid division by zero on land or weird points
-    dx = np.maximum(dx, 1.0)
-    dy = np.maximum(dy, 1.0)
+    # 1. Calculate total number of horizontal grid points
+    n_points = ny * nx
     
+    # 2. Single flattened loop for OpenMP thread distribution
+    for p in prange(n_points):
+        # 3. Reconstruct 2D spatial indices (j, i)
+        j = p // nx
+        i = p % nx
+        
+        # --- DX (Distance along I-axis) ---
+        if i < nx - 1:
+            dist_x = haversine_dist(lon_2d[j, i], lat_2d[j, i], 
+                                    lon_2d[j, i+1], lat_2d[j, i+1])
+            dx[j, i] = dist_x
+        else:
+            # COMPUTE directly instead of copying to prevent parallel race conditions
+            dist_x = haversine_dist(lon_2d[j, i-1], lat_2d[j, i-1], 
+                                    lon_2d[j, i], lat_2d[j, i])
+            dx[j, i] = dist_x
+            
+        # --- DY (Distance along J-axis) ---
+        if j < ny - 1:
+            dist_y = haversine_dist(lon_2d[j, i], lat_2d[j, i], 
+                                    lon_2d[j+1, i], lat_2d[j+1, i])
+            dy[j, i] = dist_y
+        else:
+            # COMPUTE directly, and fixed index to j-1 (Southern neighbor)
+            dist_y = haversine_dist(lon_2d[j-1, i], lat_2d[j-1, i], 
+                                    lon_2d[j, i], lat_2d[j, i])
+            dy[j, i] = dist_y
+            
+        # --- Safety Clamp ---
+        # Done inside the loop to avoid a second memory pass over the full array
+        if dx[j, i] < 1.0:
+            dx[j, i] = 1.0
+        if dy[j, i] < 1.0:
+            dy[j, i] = 1.0
+            
     return dx, dy
 
 def calculate_grid_metrics(ds):
@@ -82,6 +96,7 @@ def calculate_dz_from_centers(depths_1d):
     interfaces[nz] = depths_1d[-1] + (depths_1d[-1] - interfaces[nz-1])
     return np.diff(interfaces)
 
+
 @njit(parallel=True, fastmath=True)
 def calculate_w(u, v, dz_3d, dx, dy):
     """
@@ -91,52 +106,60 @@ def calculate_w(u, v, dz_3d, dx, dy):
     nz, ny, nx = u.shape
     w = np.zeros((nz + 1, ny, nx))
 
-    # Parallelize over Latitude (J) for best load balancing
-    for j in prange(1, ny - 1):
-        for i in range(1, nx - 1):
+    # 1. Calculate the exact number of inner domain points
+    n_j = ny - 2  # Equivalent to range(1, ny - 1)
+    n_i = nx - 2  # Equivalent to range(1, nx - 1)
+    n_points = n_j * n_i
+
+    # 2. Single flattened loop for OpenMP thread distribution
+    for p in prange(n_points):
+        # 3. Reconstruct spatial indices with a +1 offset to skip boundary walls
+        j = 1 + (p // n_i)
+        i = 1 + (p % n_i)
             
-            # Skip land columns
-            if dz_3d[0, j, i] <= 1e-6:
+        # Skip land columns
+        if dz_3d[0, j, i] <= 1e-6:
+            continue
+
+        dx_c = dx[j, i]
+        dy_c = dy[j, i]
+        current_w = 0.0
+        
+        # --- PHASE 1: INTEGRATE DOWNWARD ---
+        for k in range(nz):
+            dz_c = dz_3d[k, j, i]
+            
+            # If we hit the seafloor inside the column
+            if dz_c <= 1e-6:
+                w[k+1, j, i] = 0.0
                 continue
 
-            dx_c = dx[j, i]
-            dy_c = dy[j, i]
-            current_w = 0.0
+            # Face Velocities
+            # (Check neighbors for land boundaries)
+            u_west  = 0.5 * (u[k, j, i-1] + u[k, j, i]) if dz_3d[k, j, i-1] > 1e-6 else 0.0
+            u_east  = 0.5 * (u[k, j, i] + u[k, j, i+1]) if dz_3d[k, j, i+1] > 1e-6 else 0.0
+            v_south = 0.5 * (v[k, j-1, i] + v[k, j, i]) if dz_3d[k, j-1, i] > 1e-6 else 0.0
+            v_north = 0.5 * (v[k, j, i] + v[k, j+1, i]) if dz_3d[k, j+1, i] > 1e-6 else 0.0
             
-            # --- PHASE 1: INTEGRATE DOWNWARD ---
-            for k in range(nz):
-                dz_c = dz_3d[k, j, i]
-                
-                # If we hit the seafloor inside the column
-                if dz_c <= 1e-6:
-                    w[k+1, j, i] = 0.0
-                    continue
-
-                # Face Velocities
-                # (Check neighbors for land boundaries)
-                u_west  = 0.5 * (u[k, j, i-1] + u[k, j, i]) if dz_3d[k, j, i-1] > 1e-6 else 0.0
-                u_east  = 0.5 * (u[k, j, i] + u[k, j, i+1]) if dz_3d[k, j, i+1] > 1e-6 else 0.0
-                v_south = 0.5 * (v[k, j-1, i] + v[k, j, i]) if dz_3d[k, j-1, i] > 1e-6 else 0.0
-                v_north = 0.5 * (v[k, j, i] + v[k, j+1, i]) if dz_3d[k, j+1, i] > 1e-6 else 0.0
-                
-                # Divergence
-                div_h = ((u_east - u_west) / dx_c) + ((v_north - v_south) / dy_c)
-                
-                # Update W (Accumulate)
-                current_w = current_w + (div_h * dz_c)
-                w[k+1, j, i] = current_w
-
-            # --- PHASE 2: LINEAR CORRECTION ---
-            # The bottom value (w[nz]) should be 0. If not, remove the error.
-            bottom_error = w[nz, j, i]
+            # Divergence
+            div_h = ((u_east - u_west) / dx_c) + ((v_north - v_south) / dy_c)
             
-            if abs(bottom_error) > 1e-10:
-                for k in range(1, nz + 1):
-                    # Linearly scale the correction from Surface (0) to Bottom (1)
-                    weight = float(k) / float(nz)
-                    w[k, j, i] -= bottom_error * weight
-                    
+            # Update W (Accumulate)
+            current_w = current_w + (div_h * dz_c)
+            w[k+1, j, i] = current_w
+
+        # --- PHASE 2: LINEAR CORRECTION ---
+        # The bottom value (w[nz]) should be 0. If not, remove the error.
+        bottom_error = w[nz, j, i]
+        
+        if abs(bottom_error) > 1e-10:
+            for k in range(1, nz + 1):
+                # Linearly scale the correction from Surface (0) to Bottom (1)
+                weight = float(k) / float(nz)
+                w[k, j, i] -= bottom_error * weight
+                
     return w
+
 
 @njit(parallel=True, fastmath=True)
 def advection_neumann(tracer, u, v, w, dz, dt, dx, dy, is_global=False):
@@ -153,53 +176,69 @@ def advection_neumann(tracer, u, v, w, dz, dt, dx, dy, is_global=False):
     i_start = 0 if is_global else 1
     i_end = nx if is_global else nx - 1
     
-    for j in prange(1, ny - 1):  # North/South usually remain hard boundaries (land/ice)
+    # Calculate the exact number of valid points for the flattened loop
+    n_j = (ny - 1) - 1   # Equivalent to range(1, ny - 1)
+    n_i = i_end - i_start # Equivalent to range(i_start, i_end)
+    n_points = n_j * n_i
+    
+    # 3. Single flattened loop for OpenMP thread distribution
+    for p in prange(n_points):
+        # Reconstruct spatial indices, applying the necessary boundary offsets
+        j = 1 + (p // n_i)
+        i = i_start + (p % n_i)
+        
+        dx_c = dx[j, i]
+        dy_c = dy[j, i]
+        
+        # 4. Vertical loop explicitly evaluated inside the spatial loop
         for k in range(nz):
-            for i in range(i_start, i_end):
-                if dz[k, j, i] <= 1e-6: continue
+            if dz[k, j, i] <= 1e-6: 
+                continue
 
-                dx_c = dx[j, i]
-                dy_c = dy[j, i]
-                dz_c = dz[k, j, i]
+            dz_c = dz[k, j, i]
 
-                # --- 1. Horizontal ---
-                u_val = u[k, j, i]
-                v_val = v[k, j, i]
-                
-                # Identify Neighbors (Neumann Check Inline)
-                i_up = i - 1 if u_val > 0 else i + 1
-                j_up = j - 1 if v_val > 0 else j + 1
-                
-                # 3. APPLY PERIODIC BOUNDARY WRAP-AROUND
-                if is_global:
-                    if i_up < 0:
-                        i_up = nx - 1
-                    elif i_up >= nx:
-                        i_up = 0
-                
-                # Get Values (Check if neighbor is land)
-                c = tracer[k, j, i]
-                c_up_x = tracer[k, j, i_up] if dz[k, j, i_up] > 1e-6 else c
-                c_up_y = tracer[k, j_up, i] if dz[k, j_up, i] > 1e-6 else c
-                
-                # Generalized Advection Formula
-                term_x = np.abs(u_val) * (c - c_up_x) / dx_c
-                term_y = np.abs(v_val) * (c - c_up_y) / dy_c
+            # --- 1. Horizontal ---
+            u_val = u[k, j, i]
+            v_val = v[k, j, i]
+            
+            # Identify Neighbors (Neumann Check Inline)
+            i_up = i - 1 if u_val > 0 else i + 1
+            j_up = j - 1 if v_val > 0 else j + 1
+            
+            # 3. APPLY PERIODIC BOUNDARY WRAP-AROUND
+            if is_global:
+                if i_up < 0:
+                    i_up = nx - 1
+                elif i_up >= nx:
+                    i_up = 0
+            
+            # Get Values (Check if neighbor is land)
+            c = tracer[k, j, i]
+            c_up_x = tracer[k, j, i_up] if dz[k, j, i_up] > 1e-6 else c
+            c_up_y = tracer[k, j_up, i] if dz[k, j_up, i] > 1e-6 else c
+            
+            # Generalized Advection Formula
+            term_x = np.abs(u_val) * (c - c_up_x) / dx_c
+            term_y = np.abs(v_val) * (c - c_up_y) / dy_c
 
-                # --- 2. Vertical (Standard) ---
-                w_val = 0.5 * (w[k, j, i] + w[k+1, j, i])
-                if k == 0: 
-                    term_z = 0.0 if w_val < 0 else w_val * (c - tracer[k+1, j, i]) / dz_c
-                elif k == nz - 1:
-                    term_z = 0.0 if w_val > 0 else w_val * (tracer[k-1, j, i] - c) / dz_c
-                else:
-                    if w_val > 0: term_z = w_val * (c - tracer[k+1, j, i]) / dz_c
-                    else:         term_z = w_val * (tracer[k-1, j, i] - c) / dz_c
+            # --- 2. Vertical (Standard) ---
+            w_val = 0.5 * (w[k, j, i] + w[k+1, j, i])
+            
+            if k == 0: 
+                term_z = 0.0 if w_val < 0 else w_val * (c - tracer[k+1, j, i]) / dz_c
+            elif k == nz - 1:
+                term_z = 0.0 if w_val > 0 else w_val * (tracer[k-1, j, i] - c) / dz_c
+            else:
+                if w_val > 0: 
+                    term_z = w_val * (c - tracer[k+1, j, i]) / dz_c
+                else:         
+                    term_z = w_val * (tracer[k-1, j, i] - c) / dz_c
 
-                # --- 3. Total Change ---
-                tracer_new[k, j, i] = c - dt * (term_x + term_y + term_z)
+            # --- 3. Total Change ---
+            tracer_new[k, j, i] = c - dt * (term_x + term_y + term_z)
 
     return tracer_new
+    
 
 @njit(parallel=True, fastmath=True)
 def calculate_full_kz(mld_2d, rho_3d, dz_3d, k_mld_max=1e-2, k_bg_min=1e-6, k_deep_max=1e-4):    
@@ -215,43 +254,52 @@ def calculate_full_kz(mld_2d, rho_3d, dz_3d, k_mld_max=1e-2, k_bg_min=1e-6, k_de
     g = 9.81
     rho_0 = 1035.0
     
-    for j in prange(ny):
-        for i in range(nx):
-            mld = mld_2d[j, i]
-            
-            if np.isnan(mld) or dz_3d[0, j, i] < 1e-6:
-                kz_3d[:, j, i] = np.nan
-                continue
-                
-            current_depth = 0.0
-            
+    # 1. Calculate total number of horizontal grid points
+    n_points = ny * nx
+    
+    # 2. Single flattened loop for maximum OpenMP thread distribution
+    for p in prange(n_points):
+        # 3. Reconstruct 2D spatial indices (j, i) from the 1D index (p)
+        j = p // nx
+        i = p % nx
+        
+        mld = mld_2d[j, i]
+        
+        if np.isnan(mld) or dz_3d[0, j, i] < 1e-6:
+            # Replaced slice with explicit loop for maximum Numba fastmath compatibility
             for k in range(nz):
-                dz = dz_3d[k, j, i]
-                current_depth += dz
-                
-                # --- REGION 1: INSIDE MLD (Simplified KPP) ---
-                if current_depth <= mld:
-                    sigma = current_depth / mld
-                    shape = sigma * (1.0 - sigma)**2
-                    kz_3d[k, j, i] = k_bg_min + (k_mld_max * 6.75 * shape)
-                
-                # --- REGION 2: BELOW MLD (Inverse Stratification) ---
+                kz_3d[k, j, i] = np.nan
+            continue
+            
+        current_depth = 0.0
+        
+        for k in range(nz):
+            dz = dz_3d[k, j, i]
+            current_depth += dz
+            
+            # --- REGION 1: INSIDE MLD (Simplified KPP) ---
+            if current_depth <= mld:
+                sigma = current_depth / mld
+                shape = sigma * (1.0 - sigma)**2
+                kz_3d[k, j, i] = k_bg_min + (k_mld_max * 6.75 * shape)
+            
+            # --- REGION 2: BELOW MLD (Inverse Stratification) ---
+            else:
+                # Calculate local N^2 (Buoyancy Frequency)
+                if k < nz - 1:
+                    drho = rho_3d[k+1, j, i] - rho_3d[k, j, i]
+                    dz_eff = 0.5 * (dz_3d[k, j, i] + dz_3d[k+1, j, i])
+                    N2 = max((g / rho_0) * (drho / dz_eff), 1e-7)
                 else:
-                    # Calculate local N^2 (Buoyancy Frequency)
-                    if k < nz - 1:
-                        drho = rho_3d[k+1, j, i] - rho_3d[k, j, i]
-                        dz_eff = 0.5 * (dz_3d[k, j, i] + dz_3d[k+1, j, i])
-                        N2 = max((g / rho_0) * (drho / dz_eff), 1e-7)
-                    else:
-                        N2 = 1e-7 
-                    
-                    k_deep = 1e-7 / np.sqrt(N2)
-                    
-                    # UPDATED LINE: 
-                    # Clamp Kz between k_bg_min (floor) and k_deep_max (ceiling)
-                    kz_3d[k, j, i] = min(max(k_deep, k_bg_min), k_deep_max)
-                    
+                    N2 = 1e-7 
+                
+                k_deep = 1e-7 / np.sqrt(N2)
+                
+                # Clamp Kz between k_bg_min (floor) and k_deep_max (ceiling)
+                kz_3d[k, j, i] = min(max(k_deep, k_bg_min), k_deep_max)
+                
     return kz_3d
+
 
 @njit(parallel=True, fastmath=True)
 def diffusion_robust(tracer, k_z, dz_3d, dt):
@@ -266,66 +314,75 @@ def diffusion_robust(tracer, k_z, dz_3d, dt):
     # Tiny number to avoid division by zero
     epsilon = 1e-6
     
-    for j in prange(ny):
-        for i in range(nx):
-            # 1. LAND CHECK: If surface is NaN, the whole column is land.
-            if np.isnan(tracer[0, j, i]):
-                tracer_out[:, j, i] = np.nan
+    # 1. Calculate total number of horizontal grid points
+    n_points = ny * nx
+    
+    # 2. Single flattened loop for maximum OpenMP thread distribution
+    for p in prange(n_points):
+        # 3. Reconstruct 2D spatial indices (j, i) from the 1D index (p)
+        j = p // nx
+        i = p % nx
+        
+        # 1. LAND CHECK: If surface is NaN, the whole column is land.
+        if np.isnan(tracer[0, j, i]):
+            # Replaced slice with explicit loop for better Numba fastmath compatibility
+            for k in range(nz):
+                tracer_out[k, j, i] = np.nan
+            continue
+
+        # Initialize Fluxes (defined at interfaces)
+        # flux[k] is flux across top interface of cell k
+        flux = np.zeros(nz + 1)
+
+        # --- CALCULATE FLUXES (Interfaces) ---
+        for k in range(nz - 1): # Interfaces 0, 1, ..., nz-2
+            # Interface is between cell k (Top) and k+1 (Bottom)
+            
+            # Effective thickness distance
+            delta_z = 0.5 * (dz_3d[k, j, i] + dz_3d[k+1, j, i])
+            
+            # SAFETY 1: If dz is zero (bottom boundary or weird grid), NO FLUX.
+            if delta_z < epsilon:
+                flux[k+1] = 0.0
                 continue
 
-            # Initialize Fluxes (defined at interfaces)
-            # flux[k] is flux across top interface of cell k
-            flux = np.zeros(nz + 1)
-
-            # --- CALCULATE FLUXES (Interfaces) ---
-            for k in range(nz - 1): # Interfaces 0, 1, ..., nz-2
-                # Interface is between cell k (Top) and k+1 (Bottom)
-                
-                # Effective thickness distance
-                delta_z = 0.5 * (dz_3d[k, j, i] + dz_3d[k+1, j, i])
-                
-                # SAFETY 1: If dz is zero (bottom boundary or weird grid), NO FLUX.
-                if delta_z < epsilon:
-                    flux[k+1] = 0.0
-                    continue
-
-                # Interface K (Arithmetic Mean)
-                k_face = 0.5 * (k_z[k, j, i] + k_z[k+1, j, i])
-                
-                # SAFETY 2: Stability Clamp
-                # Max allowed K = 0.5 * dz^2 / dt
-                # We use 0.45 for safety margin
-                k_max = 0.45 * (delta_z**2) / dt
-                
-                # If K is too huge for this grid cell, clamp it.
-                if k_face > k_max:
-                    k_eff = k_max
-                else:
-                    k_eff = k_face
-                
-                # Calculate Flux (Positive Upwards)
-                # Flux = K * dC/dz
-                grad = (tracer[k+1, j, i] - tracer[k, j, i]) / delta_z
-                flux[k+1] = k_eff * grad
-
-            # Top and Bottom Boundary Conditions (No Flux)
-            flux[0]  = 0.0
-            flux[nz] = 0.0
+            # Interface K (Arithmetic Mean)
+            k_face = 0.5 * (k_z[k, j, i] + k_z[k+1, j, i])
             
-            # --- UPDATE TRACER ---
-            for k in range(nz):
-                vol = dz_3d[k, j, i]
+            # SAFETY 2: Stability Clamp
+            # Max allowed K = 0.5 * dz^2 / dt
+            # We use 0.45 for safety margin
+            k_max = 0.45 * (delta_z**2) / dt
+            
+            # If K is too huge for this grid cell, clamp it.
+            if k_face > k_max:
+                k_eff = k_max
+            else:
+                k_eff = k_face
+            
+            # Calculate Flux (Positive Upwards)
+            # Flux = K * dC/dz
+            grad = (tracer[k+1, j, i] - tracer[k, j, i]) / delta_z
+            flux[k+1] = k_eff * grad
+
+        # Top and Bottom Boundary Conditions (No Flux)
+        flux[0]  = 0.0
+        flux[nz] = 0.0
+        
+        # --- UPDATE TRACER ---
+        for k in range(nz):
+            vol = dz_3d[k, j, i]
+            
+            # SAFETY 3: Avoid updating zero-volume cells (land)
+            if vol < epsilon:
+                tracer_out[k, j, i] = tracer[k, j, i]
+            else:
+                # Divergence: Flux In (Bottom) - Flux Out (Top)
+                # flux[k+1] enters from bottom
+                # flux[k] leaves from top
+                trend = (flux[k+1] - flux[k]) / vol
+                tracer_out[k, j, i] = tracer[k, j, i] + dt * trend
                 
-                # SAFETY 3: Avoid updating zero-volume cells (land)
-                if vol < epsilon:
-                    tracer_out[k, j, i] = tracer[k, j, i]
-                else:
-                    # Divergence: Flux In (Bottom) - Flux Out (Top)
-                    # flux[k+1] enters from bottom
-                    # flux[k] leaves from top
-                    trend = (flux[k+1] - flux[k]) / vol
-                    tracer_out[k, j, i] = tracer[k, j, i] + dt * trend
-                    
     return tracer_out
 
 def create_restoring_weights(water_mask, sponge_width, tau_lateral, tau_bottom, dt, is_global=False):
@@ -487,6 +544,7 @@ def mixing_convective(tracer, rho_3d, dz_3d, delta_rho_mld):
                 
     return tracer_out
 
+
 @njit(parallel=True, fastmath=True)
 def calculate_mld(rho_3d, dz_3d, delta_rho_mld):
     """
@@ -496,40 +554,47 @@ def calculate_mld(rho_3d, dz_3d, delta_rho_mld):
     nz, ny, nx = rho_3d.shape
     mld_2d = np.zeros((ny, nx))
     
-    for j in prange(ny):
-        for i in range(nx):
-            # Land Check
-            if dz_3d[0, j, i] < 1e-6 or np.isnan(rho_3d[0, j, i]):
-                mld_2d[j, i] = np.nan
-                continue
+    # 1. Calculate total number of horizontal grid points
+    n_points = ny * nx
+    
+    # 2. Single flattened loop for maximum OpenMP thread distribution
+    for p in prange(n_points):
+        # 3. Reconstruct 2D spatial indices (j, i) from the 1D index (p)
+        j = p // nx
+        i = p % nx
+        
+        # Land Check
+        if dz_3d[0, j, i] < 1e-6 or np.isnan(rho_3d[0, j, i]):
+            mld_2d[j, i] = np.nan
+            continue
+        
+        # 1. Find the reference layer (closest to 10m depth)
+        depth_accum = 0.0
+        k_ref = 0
+        for k in range(nz):
+            depth_accum += dz_3d[k, j, i]
+            if depth_accum >= 10.0:
+                k_ref = k
+                break
+                
+        rho_ref = rho_3d[k_ref, j, i]
+        
+        # 2. Calculate MLD checking against the 10m reference
+        current_depth = 0.0
+        for k in range(nz):
+            current_depth += dz_3d[k, j, i]
             
-            # 1. Find the reference layer (closest to 10m depth)
-            depth_accum = 0.0
-            k_ref = 0
-            for k in range(nz):
-                depth_accum += dz_3d[k, j, i]
-                if depth_accum >= 10.0:
-                    k_ref = k
+            # Only check for the threshold once we are at or below the 10m reference
+            if k >= k_ref:
+                # If the water becomes significantly heavier than the 10m water
+                if (rho_3d[k, j, i] - rho_ref) > delta_rho_mld:
+                    # We hit the pycnocline! Back up to the top of this layer and break.
+                    current_depth -= dz_3d[k, j, i]
                     break
                     
-            rho_ref = rho_3d[k_ref, j, i]
-            
-            # 2. Calculate MLD checking against the 10m reference
-            current_depth = 0.0
-            for k in range(nz):
-                current_depth += dz_3d[k, j, i]
-                
-                # Only check for the threshold once we are at or below the 10m reference
-                if k >= k_ref:
-                    # If the water becomes significantly heavier than the 10m water
-                    if (rho_3d[k, j, i] - rho_ref) > delta_rho_mld:
-                        # We hit the pycnocline! Back up to the top of this layer and break.
-                        current_depth -= dz_3d[k, j, i]
-                        break
-                        
-            # Failsafe: if the whole column is mixed, it will just return the domain bottom
-            mld_2d[j, i] = current_depth
-            
+        # Failsafe: if the whole column is mixed, it will just return the domain bottom
+        mld_2d[j, i] = current_depth
+        
     return mld_2d
 
 
@@ -555,41 +620,49 @@ def calc_o2_flux(o2_surf, o2_saturation, temp_surf, wind_speed, ice_fraction, dz
     ny, nx = o2_surf.shape
     
     # Use .copy() to preserve land values/masks safely
+    # (Doing this outside the prange loop is completely safe and fast)
     o2_updated = o2_surf.copy()
     
-    for j in prange(ny):
-        for i in range(nx):
-            if dz_surf[j, i] < 1e-6:
-                continue # Skip land
-                
-            o2_local = o2_surf[j, i]
-            sat_local = o2_saturation[j, i]
-            temp_local = temp_surf[j, i]
-            wind_local = wind_speed[j, i]
-            ice_local = ice_fraction[j, i]
+    # 1. Calculate total number of horizontal grid points
+    n_points = ny * nx
+    
+    # 2. Single flattened loop for maximum OpenMP thread distribution
+    for p in prange(n_points):
+        # 3. Reconstruct 2D spatial indices (j, i) from the 1D index (p)
+        j = p // nx
+        i = p % nx
+        
+        if dz_surf[j, i] < 1e-6:
+            continue # Skip land
             
-            # 1. Calculate Schmidt number for O2 (Wanninkhof 2014)
-            # Valid for seawater from -2 to 40 Celsius
-            sc_o2 = (1920.4 
-                     - 135.6 * temp_local 
-                     + 5.2122 * (temp_local**2) 
-                     - 0.10939 * (temp_local**3) 
-                     + 0.00093777 * (temp_local**4))
-                     
-            sc_o2 = max(sc_o2, 1.0) # Safety clamp to prevent negative/zero division
-            
-            # 2. Calculate Piston Velocity (kw) in cm/hr
-            kw_cm_hr = 0.251 * (wind_local**2) * ((sc_o2 / 660.0)**-0.5)
-            
-            # Convert kw from cm/hr to m/s
-            kw_m_s = kw_cm_hr * (1.0 / 100.0) * (1.0 / 3600.0)
-            
-            # 3. Calculate Flux (mmol O2 / m2 / s)
-            # Scale by open water fraction so solid ice prevents gas exchange
-            open_water_fraction = max(0.0, 1.0 - ice_local)
-            flux = kw_m_s * (sat_local - o2_local) * open_water_fraction
-            
-            # 4. Apply flux to the surface layer concentration
-            o2_updated[j, i] = o2_local + (flux / dz_surf[j, i]) * dt_step
+        o2_local = o2_surf[j, i]
+        sat_local = o2_saturation[j, i]
+        temp_local = temp_surf[j, i]
+        wind_local = wind_speed[j, i]
+        ice_local = ice_fraction[j, i]
+        
+        # 1. Calculate Schmidt number for O2 (Wanninkhof 2014)
+        # Valid for seawater from -2 to 40 Celsius
+        sc_o2 = (1920.4 
+                 - 135.6 * temp_local 
+                 + 5.2122 * (temp_local**2) 
+                 - 0.10939 * (temp_local**3) 
+                 + 0.00093777 * (temp_local**4))
+                 
+        sc_o2 = max(sc_o2, 1.0) # Safety clamp to prevent negative/zero division
+        
+        # 2. Calculate Piston Velocity (kw) in cm/hr
+        kw_cm_hr = 0.251 * (wind_local**2) * ((sc_o2 / 660.0)**-0.5)
+        
+        # Convert kw from cm/hr to m/s
+        kw_m_s = kw_cm_hr * (1.0 / 100.0) * (1.0 / 3600.0)
+        
+        # 3. Calculate Flux (mmol O2 / m2 / s)
+        # Scale by open water fraction so solid ice prevents gas exchange
+        open_water_fraction = max(0.0, 1.0 - ice_local)
+        flux = kw_m_s * (sat_local - o2_local) * open_water_fraction
+        
+        # 4. Apply flux to the surface layer concentration
+        o2_updated[j, i] = o2_local + (flux / dz_surf[j, i]) * dt_step
 
     return o2_updated
