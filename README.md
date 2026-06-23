@@ -27,7 +27,12 @@ pip install -r requirements.txt
 ### An example test case: GOEPR_ERA5_Hokkaido
 
 * Download the forcing dataset from [Zenodo](https://zenodo.org/records/19703262).
-* Rename the above dataset directory as **GOEPR_ERA5_Hokkaido** and place it under `py-off-bgc/input`.
+```
+mkdir input/GOEPR_ERA5_Hokkaido
+cd input/GOEPR_ERA5_Hokkaido
+zenodo_get 19703262
+```
+
 * Create the BGC climatology.
 * In your root directory, run the simulation
 ```
