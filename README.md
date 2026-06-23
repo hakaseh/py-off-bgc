@@ -19,7 +19,7 @@ source activate env
 
 Via Pip
 ```
-python -m venv env
+python3 -m venv env
 source env/bin/activate
 pip install -r requirements.txt
 ```
@@ -33,7 +33,7 @@ pip install -r requirements.txt
 ```
 cd;
 cd py-off-bgc
-python -m run.run_goepr
+python3 -m run.run_goepr
 ```
 
 ## Run files (to be moved to run/README.md)
@@ -107,8 +107,8 @@ sim = OfflineSimulator(
 Some computational stats can be calculated using either `/usr/bin/time` (for Linux) or `/opt/homebrew/bin/gtime` (for Mac). For example:
 
 ```
-/usr/bin/time -v python -m run.run_jcope-fgo
-/opt/homebrew/bin/gtime -v python -m run.run_jcope-fgo
+/usr/bin/time -v python3 -m run.run_jcope-fgo
+/opt/homebrew/bin/gtime -v python3 -m run.run_jcope-fgo
 ```
 Benchmarking with Oyashio (32 CPUs)
 * JCOPE-FGO-NEMURO: 1 year, T-domain, 1800s, 3 hours, 6 CPUs, 2.6 GB --> blow up.
