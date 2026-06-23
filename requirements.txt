@@ -11,3 +11,4 @@ gsw
 matplotlib
 ipykernel
 taichi
+zenodo_get
