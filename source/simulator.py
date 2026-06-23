@@ -164,7 +164,7 @@ class OfflineSimulator:
             # Calc W
             u[~self.water_mask] = 0.0
             v[~self.water_mask] = 0.0
-            w = physics.calculate_w(u, v, self.dz_static, self.dx, self.dy)  
+            w = physics.calculate_w_rigid_lid(u, v, self.dz_static, self.dx, self.dy)  
 
             # Calculate O2 Saturation ONCE per day
             if "oxygen" in self.bgc_model.tracers:

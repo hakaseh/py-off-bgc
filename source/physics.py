@@ -162,86 +162,195 @@ def calculate_w(u, v, dz_3d, dx, dy):
 
 
 @njit(parallel=True, fastmath=True)
+def calculate_w_bottom_up(u, v, dz_3d, dx, dy):
+    """
+    Calculates W integrating Bottom -> Surface.
+    Bypasses the need for SSH time derivatives.
+    W at the seafloor is strictly forced to 0.0.
+    """
+    nz, ny, nx = u.shape
+    
+    # w array has nz + 1 levels (faces of the cells)
+    # w[nz] is the absolute bottom, w[0] is the surface
+    w = np.zeros((nz + 1, ny, nx))
+
+    n_j = ny - 2  
+    n_i = nx - 2  
+    n_points = n_j * n_i
+
+    for p in prange(n_points):
+        j = 1 + (p // n_i)
+        i = 1 + (p % n_i)
+            
+        # Skip land columns entirely
+        if dz_3d[0, j, i] <= 1e-6:
+            continue
+
+        dx_c = dx[j, i]
+        dy_c = dy[j, i]
+        
+        # Start at the seafloor with 0 velocity
+        current_w = 0.0
+        
+        # --- INTEGRATE UPWARD (k goes from nz-1 down to 0) ---
+        for k in range(nz - 1, -1, -1):
+            dz_c = dz_3d[k, j, i]
+            
+            # If we are below the seafloor in a stepped-bathymetry model
+            if dz_c <= 1e-6:
+                w[k, j, i] = 0.0
+                continue
+
+            # Face Velocities
+            u_west  = 0.5 * (u[k, j, i-1] + u[k, j, i]) if dz_3d[k, j, i-1] > 1e-6 else 0.0
+            u_east  = 0.5 * (u[k, j, i] + u[k, j, i+1]) if dz_3d[k, j, i+1] > 1e-6 else 0.0
+            v_south = 0.5 * (v[k, j-1, i] + v[k, j, i]) if dz_3d[k, j-1, i] > 1e-6 else 0.0
+            v_north = 0.5 * (v[k, j, i] + v[k, j+1, i]) if dz_3d[k, j+1, i] > 1e-6 else 0.0
+            
+            # Horizontal Divergence
+            div_h = ((u_east - u_west) / dx_c) + ((v_north - v_south) / dy_c)
+            
+            # Update W: W_top = W_bottom - (Divergence * dz)
+            current_w = current_w - (div_h * dz_c)
+            
+            # Assign to the TOP face of the current cell
+            w[k, j, i] = current_w
+                
+    return w
+
+
+@njit(parallel=True, fastmath=True)
+def calculate_w_rigid_lid(u, v, dz_3d, dx, dy):
+    """
+    Top-Down integration with linear correction.
+    Properly detects actual bathymetry (k_bottom) to force
+    seafloor W to exactly 0.0 in shallow regions.
+    """
+    nz, ny, nx = u.shape
+    w = np.zeros((nz + 1, ny, nx))
+
+    n_j = ny - 2  
+    n_i = nx - 2  
+    n_points = n_j * n_i
+
+    for p in prange(n_points):
+        j = 1 + (p // n_i)
+        i = 1 + (p % n_i)
+            
+        if dz_3d[0, j, i] <= 1e-6:
+            continue
+
+        # --- 1. FIND THE TRUE SEAFLOOR ---
+        k_bottom = nz
+        for k in range(nz):
+            if dz_3d[k, j, i] <= 1e-6:
+                k_bottom = k
+                break
+
+        dx_c = dx[j, i]
+        dy_c = dy[j, i]
+        
+        # 2. Start at surface with 0 velocity
+        current_w = 0.0
+        
+        # 3. Integrate Downward ONLY to the true seafloor
+        for k in range(k_bottom):
+            dz_c = dz_3d[k, j, i]
+
+            u_west  = 0.5 * (u[k, j, i-1] + u[k, j, i]) if dz_3d[k, j, i-1] > 1e-6 else 0.0
+            u_east  = 0.5 * (u[k, j, i] + u[k, j, i+1]) if dz_3d[k, j, i+1] > 1e-6 else 0.0
+            v_south = 0.5 * (v[k, j-1, i] + v[k, j, i]) if dz_3d[k, j-1, i] > 1e-6 else 0.0
+            v_north = 0.5 * (v[k, j, i] + v[k, j+1, i]) if dz_3d[k, j+1, i] > 1e-6 else 0.0
+            
+            div_h = ((u_east - u_west) / dx_c) + ((v_north - v_south) / dy_c)
+            
+            current_w = current_w + (div_h * dz_c)
+            w[k+1, j, i] = current_w
+
+        # --- 4. TRUE LINEAR CORRECTION ---
+        # The true bottom value must be 0. 
+        bottom_error = w[k_bottom, j, i]
+        
+        if abs(bottom_error) > 1e-10:
+            for k in range(1, k_bottom + 1):
+                # Weight increases from 0 (surface) to 1 (seafloor)
+                weight = float(k) / float(k_bottom)
+                w[k, j, i] -= bottom_error * weight
+                
+    return w
+
+
+import numpy as np
+from numba import njit, prange
+
+@njit(parallel=True, fastmath=True)
 def advection_neumann(tracer, u, v, w, dz, dt, dx, dy, is_global=False):
     nz, ny, nx = tracer.shape
-    
-    # 1. INITIALIZATION FIX
-    # Copy the tracer instead of using zeros_like. 
-    # This prevents untouched boundary cells from turning into 0.0!
     tracer_new = tracer.copy()
     
-    # 2. SET ZONAL BOUNDARIES
-    # If global, compute every longitude (0 to nx). 
-    # If regional, skip the boundary walls (1 to nx-1).
     i_start = 0 if is_global else 1
     i_end = nx if is_global else nx - 1
     
-    # Calculate the exact number of valid points for the flattened loop
-    n_j = (ny - 1) - 1   # Equivalent to range(1, ny - 1)
-    n_i = i_end - i_start # Equivalent to range(i_start, i_end)
+    n_j = (ny - 1) - 1   
+    n_i = i_end - i_start 
     n_points = n_j * n_i
     
-    # 3. Single flattened loop for OpenMP thread distribution
     for p in prange(n_points):
-        # Reconstruct spatial indices, applying the necessary boundary offsets
         j = 1 + (p // n_i)
         i = i_start + (p % n_i)
         
         dx_c = dx[j, i]
         dy_c = dy[j, i]
         
-        # 4. Vertical loop explicitly evaluated inside the spatial loop
         for k in range(nz):
             if dz[k, j, i] <= 1e-6: 
                 continue
 
             dz_c = dz[k, j, i]
+            c = tracer[k, j, i]
 
             # --- 1. Horizontal ---
             u_val = u[k, j, i]
             v_val = v[k, j, i]
             
-            # Identify Neighbors (Neumann Check Inline)
             i_up = i - 1 if u_val > 0 else i + 1
             j_up = j - 1 if v_val > 0 else j + 1
             
-            # 3. APPLY PERIODIC BOUNDARY WRAP-AROUND
             if is_global:
                 if i_up < 0:
                     i_up = nx - 1
                 elif i_up >= nx:
                     i_up = 0
             
-            # Get Values (Check if neighbor is land)
-            c = tracer[k, j, i]
             c_up_x = tracer[k, j, i_up] if dz[k, j, i_up] > 1e-6 else c
             c_up_y = tracer[k, j_up, i] if dz[k, j_up, i] > 1e-6 else c
             
-            # Generalized Advection Formula
             term_x = np.abs(u_val) * (c - c_up_x) / dx_c
             term_y = np.abs(v_val) * (c - c_up_y) / dy_c
 
-            # --- 2. Vertical (Standard) ---
+            # --- 2. Vertical (Bathymetry Fix) ---
             w_val = 0.5 * (w[k, j, i] + w[k+1, j, i])
             
-            if k == 0: 
-                term_z = 0.0 if w_val < 0 else w_val * (c - tracer[k+1, j, i]) / dz_c
-            elif k == nz - 1:
-                term_z = 0.0 if w_val > 0 else w_val * (tracer[k-1, j, i] - c) / dz_c
-            else:
-                if w_val > 0: 
-                    term_z = w_val * (c - tracer[k+1, j, i]) / dz_c
-                else:         
-                    term_z = w_val * (tracer[k-1, j, i] - c) / dz_c
+            # Safely identify vertical neighbors. If it's the surface/seafloor OR land, use Neumann (c)
+            c_below = tracer[k+1, j, i] if (k < nz - 1 and dz[k+1, j, i] > 1e-6) else c
+            c_above = tracer[k-1, j, i] if (k > 0 and dz[k-1, j, i] > 1e-6) else c
 
-            # --- 3. Total Change ---
-            tracer_new[k, j, i] = c - dt * (term_x + term_y + term_z)
+            if w_val > 0:  # Upward flow (water comes from below)
+                term_z = w_val * (c - c_below) / dz_c
+            else:          # Downward flow (water comes from above)
+                term_z = w_val * (c_above - c) / dz_c
+
+            # --- 3. Total Change & Safety Clamp ---
+            raw_c = c - dt * (term_x + term_y + term_z)
+            
+            # Prevent negative concentrations from floating-point errors
+            tracer_new[k, j, i] = max(0.0, raw_c)
 
     return tracer_new
-    
+
 
 @njit(parallel=True, fastmath=True)
-def calculate_full_kz(mld_2d, rho_3d, dz_3d, k_mld_max=1e-2, k_bg_min=1e-6, k_deep_max=1e-4):    
+def calculate_full_kz(mld_2d, rho_3d, dz_3d, k_mld_max=1e-2, k_bg_min=1e-9, k_deep_max=1e-5):    
     """
     Creates a full 3D Kz profile.
     Inside MLD: Simplified KPP parabolic shape.
@@ -293,7 +402,7 @@ def calculate_full_kz(mld_2d, rho_3d, dz_3d, k_mld_max=1e-2, k_bg_min=1e-6, k_de
                 else:
                     N2 = 1e-7 
                 
-                k_deep = 1e-7 / np.sqrt(N2)
+                k_deep = 1e-11 / np.sqrt(N2)
                 
                 # Clamp Kz between k_bg_min (floor) and k_deep_max (ceiling)
                 kz_3d[k, j, i] = min(max(k_deep, k_bg_min), k_deep_max)
