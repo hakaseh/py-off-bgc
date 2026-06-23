@@ -16,3 +16,4 @@ dependencies:
   - gsw
   - matplotlib
   - ipykernel
+  - taichi
