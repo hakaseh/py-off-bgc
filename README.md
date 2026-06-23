@@ -13,14 +13,14 @@ cd py-off-bgc
 
 Via Conda
 ```
-conda env create -f environment.yml
+conda env_py-off-bgc create -f environment.yml
 source activate env_py-off-bgc
 ```
 
 Via Pip
 ```
 python -m venv env_py-off-bgc
-source env/bin/activate
+source env_py-off-bgc/bin/activate
 pip install -r requirements.txt
 ```
 
