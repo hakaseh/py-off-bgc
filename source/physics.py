@@ -1,6 +1,7 @@
 import numpy as np
 from numba import njit, prange
 import math
+import taichi as ti
 
 @njit(fastmath=True)
 def haversine_dist(lon1, lat1, lon2, lat2):
@@ -280,32 +281,35 @@ def calculate_w_rigid_lid(u, v, dz_3d, dx, dy):
     return w
 
 
-import numpy as np
-from numba import njit, prange
-
-@njit(parallel=True, fastmath=True)
-def advection_neumann(tracer, u, v, w, dz, dt, dx, dy, is_global=False):
-    nz, ny, nx = tracer.shape
-    tracer_new = tracer.copy()
+@ti.kernel
+def _advection_neumann_kernel(
+    tracer: ti.types.ndarray(dtype=ti.f32),
+    tracer_new: ti.types.ndarray(dtype=ti.f32),
+    u: ti.types.ndarray(dtype=ti.f32),
+    v: ti.types.ndarray(dtype=ti.f32),
+    w: ti.types.ndarray(dtype=ti.f32),
+    dz: ti.types.ndarray(dtype=ti.f32),
+    dx: ti.types.ndarray(dtype=ti.f32),
+    dy: ti.types.ndarray(dtype=ti.f32),
+    dt: ti.f32,  # Also force the scalar dt to 32-bit
+    is_global: ti.i32
+):
+    nz = tracer.shape[0]
+    ny = tracer.shape[1]
+    nx = tracer.shape[2]
     
-    i_start = 0 if is_global else 1
-    i_end = nx if is_global else nx - 1
-    
-    n_j = (ny - 1) - 1   
-    n_i = i_end - i_start 
-    n_points = n_j * n_i
-    
-    for p in prange(n_points):
-        j = 1 + (p // n_i)
-        i = i_start + (p % n_i)
+    # Taichi automatically parallelizes this 3D loop across thousands of GPU cores
+    for k, j, i in ti.ndrange(nz, ny, nx):
         
-        dx_c = dx[j, i]
-        dy_c = dy[j, i]
-        
-        for k in range(nz):
-            if dz[k, j, i] <= 1e-6: 
-                continue
-
+        # 1. Replicate the Numba spatial boundary masking (i_start, i_end, n_j)
+        is_valid_j = (j >= 1) and (j < ny - 1)
+        is_valid_i = True
+        if is_global == 0:
+            is_valid_i = (i >= 1) and (i < nx - 1)
+            
+        if is_valid_j and is_valid_i and dz[k, j, i] > 1e-6:
+            dx_c = dx[j, i]
+            dy_c = dy[j, i]
             dz_c = dz[k, j, i]
             c = tracer[k, j, i]
 
@@ -313,71 +317,93 @@ def advection_neumann(tracer, u, v, w, dz, dt, dx, dy, is_global=False):
             u_val = u[k, j, i]
             v_val = v[k, j, i]
             
-            i_up = i - 1 if u_val > 0 else i + 1
-            j_up = j - 1 if v_val > 0 else j + 1
+            i_up = i - 1 if u_val > 0.0 else i + 1
+            j_up = j - 1 if v_val > 0.0 else j + 1
             
-            if is_global:
+            if is_global == 1:
                 if i_up < 0:
                     i_up = nx - 1
                 elif i_up >= nx:
                     i_up = 0
             
+            # Safe neighbor assignment
             c_up_x = tracer[k, j, i_up] if dz[k, j, i_up] > 1e-6 else c
             c_up_y = tracer[k, j_up, i] if dz[k, j_up, i] > 1e-6 else c
             
-            term_x = np.abs(u_val) * (c - c_up_x) / dx_c
-            term_y = np.abs(v_val) * (c - c_up_y) / dy_c
+            term_x = ti.abs(u_val) * (c - c_up_x) / dx_c
+            term_y = ti.abs(v_val) * (c - c_up_y) / dy_c
 
-            # --- 2. Vertical (Bathymetry Fix) ---
+            # --- 2. Vertical ---
             w_val = 0.5 * (w[k, j, i] + w[k+1, j, i])
             
-            # Safely identify vertical neighbors. If it's the surface/seafloor OR land, use Neumann (c)
-            c_below = tracer[k+1, j, i] if (k < nz - 1 and dz[k+1, j, i] > 1e-6) else c
-            c_above = tracer[k-1, j, i] if (k > 0 and dz[k-1, j, i] > 1e-6) else c
+            # Nested IFs prevent GPU out-of-bounds indexing crashes
+            c_below = c
+            if k < nz - 1:
+                if dz[k+1, j, i] > 1e-6:
+                    c_below = tracer[k+1, j, i]
+                    
+            c_above = c
+            if k > 0:
+                if dz[k-1, j, i] > 1e-6:
+                    c_above = tracer[k-1, j, i]
 
-            if w_val > 0:  # Upward flow (water comes from below)
+            term_z = 0.0
+            if w_val > 0.0:
                 term_z = w_val * (c - c_below) / dz_c
-            else:          # Downward flow (water comes from above)
+            else:
                 term_z = w_val * (c_above - c) / dz_c
 
-            # --- 3. Total Change & Safety Clamp ---
+            # --- 3. Total Change ---
             raw_c = c - dt * (term_x + term_y + term_z)
-            
-            # Prevent negative concentrations from floating-point errors
-            tracer_new[k, j, i] = max(0.0, raw_c)
+            tracer_new[k, j, i] = ti.max(0.0, raw_c)
 
-    return tracer_new
-
-
-@njit(parallel=True, fastmath=True)
-def calculate_full_kz(mld_2d, rho_3d, dz_3d, k_mld_max=1e-2, k_bg_min=1e-9, k_deep_max=1e-5):    
-    """
-    Creates a full 3D Kz profile.
-    Inside MLD: Simplified KPP parabolic shape.
-    Below MLD: Stratification-dependent mixing (Inverse N^2).
-    """
-    nz, ny, nx = dz_3d.shape
-    kz_3d = np.zeros((nz, ny, nx))
+# --- PYTHON WRAPPER ---
+# Keep your API identical to the Numba version!
+def advection_neumann(tracer, u, v, w, dz, dt, dx, dy, is_global=False):
+    # Convert all incoming arrays to float32 for the GPU
+    tracer_f32 = tracer.astype(np.float32)
+    u_f32 = u.astype(np.float32)
+    v_f32 = v.astype(np.float32)
+    w_f32 = w.astype(np.float32)
+    dz_f32 = dz.astype(np.float32)
+    dx_f32 = dx.astype(np.float32)
+    dy_f32 = dy.astype(np.float32)
     
-    # Standard gravity and reference density for N^2
+    # Create the output array as float32
+    tracer_new_f32 = tracer_f32.copy()
+    
+    # Run the GPU kernel
+    _advection_neumann_kernel(
+        tracer_f32, tracer_new_f32, u_f32, v_f32, w_f32, dz_f32, dx_f32, dy_f32, float(dt), 1 if is_global else 0
+    )
+    
+    return tracer_new_f32
+
+@ti.kernel
+def _calculate_full_kz_kernel(
+    mld_2d: ti.types.ndarray(dtype=ti.f32),
+    rho_3d: ti.types.ndarray(dtype=ti.f32),
+    dz_3d: ti.types.ndarray(dtype=ti.f32),
+    kz_3d: ti.types.ndarray(dtype=ti.f32),
+    k_mld_max: ti.f32,
+    k_bg_min: ti.f32,
+    k_deep_max: ti.f32
+):
+    nz = dz_3d.shape[0]
+    ny = dz_3d.shape[1]
+    nx = dz_3d.shape[2]
+    
     g = 9.81
     rho_0 = 1035.0
     
-    # 1. Calculate total number of horizontal grid points
-    n_points = ny * nx
-    
-    # 2. Single flattened loop for maximum OpenMP thread distribution
-    for p in prange(n_points):
-        # 3. Reconstruct 2D spatial indices (j, i) from the 1D index (p)
-        j = p // nx
-        i = p % nx
-        
+    # Thread over the 2D surface grid (each thread gets one column)
+    for j, i in ti.ndrange(ny, nx):
         mld = mld_2d[j, i]
         
-        if np.isnan(mld) or dz_3d[0, j, i] < 1e-6:
-            # Replaced slice with explicit loop for maximum Numba fastmath compatibility
+        # Note: Taichi uses ti.math.isnan() instead of np.isnan() inside kernels
+        if ti.math.isnan(mld) or dz_3d[0, j, i] < 1e-6:
             for k in range(nz):
-                kz_3d[k, j, i] = np.nan
+                kz_3d[k, j, i] = ti.math.nan
             continue
             
         current_depth = 0.0
@@ -386,113 +412,105 @@ def calculate_full_kz(mld_2d, rho_3d, dz_3d, k_mld_max=1e-2, k_bg_min=1e-9, k_de
             dz = dz_3d[k, j, i]
             current_depth += dz
             
-            # --- REGION 1: INSIDE MLD (Simplified KPP) ---
+            # --- REGION 1: INSIDE MLD ---
             if current_depth <= mld:
                 sigma = current_depth / mld
                 shape = sigma * (1.0 - sigma)**2
                 kz_3d[k, j, i] = k_bg_min + (k_mld_max * 6.75 * shape)
             
-            # --- REGION 2: BELOW MLD (Inverse Stratification) ---
+            # --- REGION 2: BELOW MLD ---
             else:
-                # Calculate local N^2 (Buoyancy Frequency)
+                N2 = 1e-7
                 if k < nz - 1:
                     drho = rho_3d[k+1, j, i] - rho_3d[k, j, i]
                     dz_eff = 0.5 * (dz_3d[k, j, i] + dz_3d[k+1, j, i])
-                    N2 = max((g / rho_0) * (drho / dz_eff), 1e-7)
-                else:
-                    N2 = 1e-7 
+                    local_N2 = (g / rho_0) * (drho / dz_eff)
+                    N2 = ti.max(local_N2, 1e-7)
                 
-                k_deep = 1e-11 / np.sqrt(N2)
+                k_deep = 1e-11 / ti.math.sqrt(N2)
                 
-                # Clamp Kz between k_bg_min (floor) and k_deep_max (ceiling)
-                kz_3d[k, j, i] = min(max(k_deep, k_bg_min), k_deep_max)
-                
-    return kz_3d
+                kz_3d[k, j, i] = ti.min(ti.max(k_deep, k_bg_min), k_deep_max)
 
 
-@njit(parallel=True, fastmath=True)
-def diffusion_robust(tracer, k_z, dz_3d, dt):
-    """
-    Robust Explicit Diffusion.
-    1. Checks for dz < epsilon to prevent Divide-By-Zero.
-    2. Clamps K_z locally to ensure stability (CFL < 0.5).
-    """
-    nz, ny, nx = tracer.shape
-    tracer_out = np.empty_like(tracer)
+def calculate_full_kz(mld_2d, rho_3d, dz_3d, k_mld_max=1e-2, k_bg_min=1e-9, k_deep_max=1e-5):
+    # Downcast to 32-bit for the Metal GPU
+    mld_f32 = mld_2d.astype(np.float32)
+    rho_f32 = rho_3d.astype(np.float32)
+    dz_f32  = dz_3d.astype(np.float32)
+    kz_out_f32 = np.zeros_like(dz_f32)
     
-    # Tiny number to avoid division by zero
+    _calculate_full_kz_kernel(
+        mld_f32, rho_f32, dz_f32, kz_out_f32,
+        float(k_mld_max), float(k_bg_min), float(k_deep_max)
+    )
+    
+    return kz_out_f32
+
+@ti.kernel
+def _diffusion_robust_kernel(
+    tracer: ti.types.ndarray(dtype=ti.f32),
+    k_z: ti.types.ndarray(dtype=ti.f32),
+    dz_3d: ti.types.ndarray(dtype=ti.f32),
+    tracer_out: ti.types.ndarray(dtype=ti.f32),
+    dt: ti.f32
+):
+    nz = tracer.shape[0]
+    ny = tracer.shape[1]
+    nx = tracer.shape[2]
     epsilon = 1e-6
     
-    # 1. Calculate total number of horizontal grid points
-    n_points = ny * nx
-    
-    # 2. Single flattened loop for maximum OpenMP thread distribution
-    for p in prange(n_points):
-        # 3. Reconstruct 2D spatial indices (j, i) from the 1D index (p)
-        j = p // nx
-        i = p % nx
+    # Thread over the 2D surface grid
+    for j, i in ti.ndrange(ny, nx):
         
-        # 1. LAND CHECK: If surface is NaN, the whole column is land.
-        if np.isnan(tracer[0, j, i]):
-            # Replaced slice with explicit loop for better Numba fastmath compatibility
+        if ti.math.isnan(tracer[0, j, i]):
             for k in range(nz):
-                tracer_out[k, j, i] = np.nan
+                tracer_out[k, j, i] = ti.math.nan
             continue
 
-        # Initialize Fluxes (defined at interfaces)
-        # flux[k] is flux across top interface of cell k
-        flux = np.zeros(nz + 1)
-
-        # --- CALCULATE FLUXES (Interfaces) ---
-        for k in range(nz - 1): # Interfaces 0, 1, ..., nz-2
-            # Interface is between cell k (Top) and k+1 (Bottom)
-            
-            # Effective thickness distance
-            delta_z = 0.5 * (dz_3d[k, j, i] + dz_3d[k+1, j, i])
-            
-            # SAFETY 1: If dz is zero (bottom boundary or weird grid), NO FLUX.
-            if delta_z < epsilon:
-                flux[k+1] = 0.0
-                continue
-
-            # Interface K (Arithmetic Mean)
-            k_face = 0.5 * (k_z[k, j, i] + k_z[k+1, j, i])
-            
-            # SAFETY 2: Stability Clamp
-            # Max allowed K = 0.5 * dz^2 / dt
-            # We use 0.45 for safety margin
-            k_max = 0.45 * (delta_z**2) / dt
-            
-            # If K is too huge for this grid cell, clamp it.
-            if k_face > k_max:
-                k_eff = k_max
-            else:
-                k_eff = k_face
-            
-            # Calculate Flux (Positive Upwards)
-            # Flux = K * dC/dz
-            grad = (tracer[k+1, j, i] - tracer[k, j, i]) / delta_z
-            flux[k+1] = k_eff * grad
-
-        # Top and Bottom Boundary Conditions (No Flux)
-        flux[0]  = 0.0
-        flux[nz] = 0.0
+        # Surface flux is always zero (rigid lid / no atmospheric loss)
+        flux_top = 0.0
         
-        # --- UPDATE TRACER ---
+        # Sequentially walk down the column
         for k in range(nz):
             vol = dz_3d[k, j, i]
+            flux_bottom = 0.0
             
-            # SAFETY 3: Avoid updating zero-volume cells (land)
+            # 1. Calculate flux at the bottom interface of this cell
+            if k < nz - 1:
+                delta_z = 0.5 * (dz_3d[k, j, i] + dz_3d[k+1, j, i])
+                
+                if delta_z >= epsilon:
+                    k_face = 0.5 * (k_z[k, j, i] + k_z[k+1, j, i])
+                    k_max = 0.45 * (delta_z * delta_z) / dt
+                    
+                    k_eff = k_max if k_face > k_max else k_face
+                    
+                    grad = (tracer[k+1, j, i] - tracer[k, j, i]) / delta_z
+                    flux_bottom = k_eff * grad
+
+            # 2. Update the cell using Flux In (bottom) and Flux Out (top)
             if vol < epsilon:
                 tracer_out[k, j, i] = tracer[k, j, i]
             else:
-                # Divergence: Flux In (Bottom) - Flux Out (Top)
-                # flux[k+1] enters from bottom
-                # flux[k] leaves from top
-                trend = (flux[k+1] - flux[k]) / vol
+                trend = (flux_bottom - flux_top) / vol
                 tracer_out[k, j, i] = tracer[k, j, i] + dt * trend
                 
-    return tracer_out
+            # 3. Pass this cell's bottom flux down to become the next cell's top flux
+            flux_top = flux_bottom
+
+
+def diffusion_robust(tracer, k_z, dz_3d, dt):
+    tracer_f32 = tracer.astype(np.float32)
+    kz_f32 = k_z.astype(np.float32)
+    dz_f32 = dz_3d.astype(np.float32)
+    tracer_out_f32 = tracer_f32.copy()
+    
+    _diffusion_robust_kernel(
+        tracer_f32, kz_f32, dz_f32, tracer_out_f32, float(dt)
+    )
+    
+    return tracer_out_f32
+
 
 def create_restoring_weights(water_mask, sponge_width, tau_lateral, tau_bottom, dt, is_global=False):
     """

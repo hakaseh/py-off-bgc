@@ -1,3 +1,5 @@
+import taichi as ti
+ti.init(arch=ti.cpu, default_fp=ti.f32)
 import os
 import sys
 import shutil
