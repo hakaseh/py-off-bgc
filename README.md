@@ -128,4 +128,6 @@ Computing time per day of simulation: (To be deleted)
 - BRAN2020-NPZD, 60S-60N, full depth, 600 s, 90 min
 - LORA-NEMURO, full domain, 1000 m, 1200 s, 5 min
 - LORA-NPZD, full domain, 1000 m, 1200 s, 1 min
-- OFES2_NP10, JCOPE-T domain, upper 300m, 600s, 
+- OFES2_NP10, JCOPE-T domain, upper 300m, 600s,
+
+`cdo infov -selname,your_variable input.nc` will print out the min,mean,max of the varaible of interest.
