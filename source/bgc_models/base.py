@@ -24,10 +24,10 @@ class BaseBGCModel(ABC):
                 for name in self.names:
                     if name in ds_restart:
                         data = np.nan_to_num(ds_restart[name].values)
-                        self.tracers[name][:] = np.where(self.water_mask, data, 0.0)
+                        self.tracers[name] = np.where(self.water_mask, data, 0.0)
                     else:
                         print(f"    WARNING: '{name}' missing in restart! Setting to 0.01")
-                        self.tracers[name][:] = np.where(self.water_mask, 0.01, 0.0)
+                        self.tracers[name] = np.where(self.water_mask, 0.01, 0.0)
             
             # 2. CLIMATOLOGY
             else:
@@ -38,23 +38,24 @@ class BaseBGCModel(ABC):
                     if clim_var in ds_clim:
                         print(f"    -> Loading '{name}' (from '{clim_var}')")
                         data = np.nan_to_num(ds_clim[clim_var].values)
-                        self.tracers[name][:] = np.where(self.water_mask, data, 0.0)
+                        self.tracers[name] = np.where(self.water_mask, data, 0.0)
                     else:
                         print(f"    -> '{name}' not in climatology. Seeding with 0.01.")
-                        self.tracers[name][:] = np.where(self.water_mask, 0.01, 0.0)
+                        self.tracers[name] = np.where(self.water_mask, 0.01, 0.0)
 
     @abstractmethod
     def biology_step(self, t_curr, sw_curr, dz, dt):
         pass
 
+
     def sinking_step(self, dz, dt):
-        for name, speed in self.sinking_config.items():
+        """Applies sinking to specific tracers defined in sinking_config."""
+        for name, speed_day in self.sinking_config.items():
             if name in self.tracers:
-                # We use [:] to ensure we are updating the existing array 
-                # memory rather than replacing the object reference.
-                self.tracers[name][:] = apply_sinking(
+                # Pass the raw m/day speed directly; the JAX kernel handles the conversion
+                self.tracers[name] = apply_sinking(
                     self.tracers[name], 
                     dz, 
                     dt, 
-                    speed
+                    speed_day
                 )

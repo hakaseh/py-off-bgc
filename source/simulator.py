@@ -1,3 +1,4 @@
+import jax.numpy as jnp
 import numpy as np
 import xarray as xr
 import pandas as pd
@@ -6,6 +7,7 @@ import gsw
 from . import physics
 from . import bgc_models
 from .bgc_models.utils import GLODAP_MAP
+from .climatology import generate_restoring_climatology
 
 class OfflineSimulator:
     def __init__(self, 
@@ -17,6 +19,7 @@ class OfflineSimulator:
                  sponge_width=5, 
                  tau_lateral=432000.0, 
                  tau_bottom=5184000.0,
+                 tau_coast=432000.0, 
                  is_global=False):
         
         # 1. Store settings
@@ -29,6 +32,7 @@ class OfflineSimulator:
         self.sponge_width = sponge_width
         self.tau_lateral = tau_lateral
         self.tau_bottom = tau_bottom
+        self.tau_coast = tau_coast
         self.is_global = is_global
         
         # These will be set during prepare_forcing()
@@ -36,9 +40,23 @@ class OfflineSimulator:
         self.ds_clim = None
         self.mixing_method = None
 
-    def prepare_forcing(self, lat_range, lon_range, depth_range, time_range, 
-                        ds_t, ds_s, ds_u, ds_v, ds_sw, ds_wind, 
-                        ds_ice=None, ds_k=None, ds_clim=None, ds_restart=None):
+    def prepare_forcing(self, 
+                        lat_range, 
+                        lon_range, 
+                        depth_range, 
+                        time_range, 
+                        ds_t, 
+                        ds_s, 
+                        ds_u, 
+                        ds_v, 
+                        ds_sw, 
+                        ds_wind, 
+                        ds_ice=None, 
+                        ds_k=None, 
+                        ds_clim=None, 
+                        ds_restart=None,
+                        glodap_dir=None
+                       ):
         """
         Subsets all datasets, handles missing inputs, and initializes the BGC model.
         """
@@ -72,11 +90,24 @@ class OfflineSimulator:
         else:
             self.ds_ice = ds_ice.sel(time=time_range, lat=lat_range, lon=lon_range)
 
-        # 3. Subset BGC specific files
+    # --- 3. BGC CLIMATOLOGY & RESTART ---
         if ds_clim is not None:
+            # User provided a pre-processed climatology file
             self.ds_clim = ds_clim.sel(depth=depth_range, lat=lat_range, lon=lon_range)
+        elif glodap_dir is not None:
+            # User provided a directory; generate it on the fly!
+            print("\nGenerating BGC climatology on-the-fly from GLODAP...")
+            
+            # Use the first timestep of our already-subsetted temperature grid as the exact template
+            ref_template = self.ds_t.isel(time=0).squeeze()
+            
+            # Call your new function
+            self.ds_clim = generate_restoring_climatology(ref_template, glodap_dir)
+        else:
+            self.ds_clim = None
+
         if ds_restart is not None:
-            ds_restart = ds_restart.sel(depth=depth_range, lat=lat_range, lon=lon_range)
+            ds_restart = ds_restart.squeeze().sel(depth=depth_range, lat=lat_range, lon=lon_range)
 
         # 4. Execute standard setup sequence
         self.setup_grid()
@@ -110,13 +141,13 @@ class OfflineSimulator:
         
         # 3. Mask
         ref_val = self.ds_t.isel(time=0).values if 'time' in self.ds_t.dims else self.ds_t.values
-        self.water_mask = ~np.isnan(ref_val)
+        self.water_mask = ~np.isnan(ref_val) 
         self.dz_static = np.where(self.water_mask, self.dz_3d, 0.0)
         
         # 4. Restoring Weights (Sponge)
         print("Generating Restoring Map...")
         self.nudge_map = physics.create_restoring_weights(
-            self.water_mask, self.sponge_width, self.tau_lateral, self.tau_bottom, self.dt_phys, self.is_global
+            self.water_mask, self.sponge_width, self.dt_phys, self.tau_lateral, self.tau_bottom, self.tau_coast, self.is_global
         )
 
     def setup_io(self):
@@ -151,14 +182,20 @@ class OfflineSimulator:
             k = np.nan_to_num(self.ds_k.isel(time=day).values)
             t = np.nan_to_num(self.ds_t.isel(time=day).values)
             s = np.nan_to_num(self.ds_s.isel(time=day).values)
+            # set negative salinity to zero (e.g. JCOPE2M)
+            s = s = np.maximum(s, 0.0)
             sw = np.nan_to_num(self.ds_sw.isel(time=day).values)
             wind_surf = np.nan_to_num(self.ds_wind.isel(time=day).values) 
             ice_surf = np.nan_to_num(self.ds_ice.isel(time=day).values)            
             
-            # 2. Calculate potential density anomaly and MLD
+            # 2. Calculate potential density anomaly and MLD           
             SA = gsw.SA_from_SP(s, self.p_3d, self.lon_2d, self.lat_2d)
             CT = gsw.CT_from_pt(SA, t)
             rho_3d = gsw.sigma0(SA, CT)
+            
+            # Re-mask the calculated density back to 0.0 over land
+            rho_3d = np.where(self.water_mask, rho_3d, 0.0)
+            
             self.mld_2d = physics.calculate_mld(rho_3d, self.dz_static, self.mld_threshold)
             
             # Calc W
@@ -179,31 +216,28 @@ class OfflineSimulator:
                 
                 # A. PHYSICS
                 for name, tr_data in self.bgc_model.tracers.items():
-                    tr_adv = physics.advection_neumann(tr_data, u, v, w, self.dz_static, self.dt_phys, self.dx, self.dy, is_global=self.is_global)
-                    
-                    if self.mixing_method == "diffusion":
-                        tr_mix = physics.diffusion_robust(tr_adv, k, self.dz_static, self.dt_phys)
-                    # testing the simplified KPP parameterization
-                    elif self.mixing_method == "convective":
-                        k_kpp = physics.calculate_full_kz(self.mld_2d, rho_3d, self.dz_3d)
-                        tr_mix = physics.diffusion_robust(tr_adv, k_kpp, self.dz_static, self.dt_phys)
-                        #tr_mix = physics.mixing_convective(tr_adv, rho_3d, self.dz_static, self.mld_threshold)
+                    # The @jax.jit decorator automatically compiles the math 
+                    # on the very first time step, making the remaining steps incredibly fast.
+                    tr_adv = physics.advection_neumann_jax(tr_data, u, v, w, self.dz_static, self.dt_phys, self.dx, self.dy, is_global=self.is_global)
+                    k_kpp = physics.calculate_full_kz_jax(self.mld_2d, rho_3d, self.dz_3d)
+                    tr_mix = physics.diffusion_robust_jax(tr_adv, k_kpp, self.dz_static, self.dt_phys)
                         
-                    # CLAMP #1: Immediately after physics to fix advection overshoots
-                    self.bgc_model.tracers[name][:] = np.maximum(tr_mix, 0.0)
+                    # CLAMP #1: Immediately after physics to fix advection overshoots (JAX compliant)
+                    self.bgc_model.tracers[name] = jnp.maximum(tr_mix, 0.0)
 
                 # B. RESTORING
                 for var_name, clim_data in self.restoring_data.items():
                     diff = clim_data - self.bgc_model.tracers[var_name]
-                    self.bgc_model.tracers[var_name] += diff * self.nudge_map
+                    # FIX: Cannot use += on JAX arrays. Must reassign.
+                    self.bgc_model.tracers[var_name] = self.bgc_model.tracers[var_name] + (diff * self.nudge_map)
 
                 # C. BIOLOGY & SINKING
                 par_3d = self.bgc_model.biology_step(t, sw, self.dz_static, self.dt_phys)
                 self.bgc_model.sinking_step(self.dz_static, self.dt_phys)
 
-                # CLAMP #2: Immediately after biology/sinking
+                # CLAMP #2: Immediately after biology/sinking (JAX compliant)
                 for name, tr_data in self.bgc_model.tracers.items():
-                    self.bgc_model.tracers[name][:] = np.maximum(tr_data, 0.0)
+                    self.bgc_model.tracers[name] = jnp.maximum(tr_data, 0.0)
 
                 # D. AIR-SEA FLUX (OXYGEN)
                 if "oxygen" in self.bgc_model.tracers:
@@ -211,27 +245,35 @@ class OfflineSimulator:
                     temp_surf = t[0, :, :]
                     dz_surf = self.dz_static[0, :, :]
                     
+                    # FIX: Called the _jax function
                     updated_o2_surf = physics.calc_o2_flux(
                         o2_surf, o2_sat_mmol_m3, temp_surf, wind_surf, 
                         ice_surf, dz_surf, self.dt_phys
                     )
-                    self.bgc_model.tracers["oxygen"][0, :, :] = np.maximum(updated_o2_surf, 0.0)
+                    # FIX: JAX slice reassignment
+                    self.bgc_model.tracers["oxygen"] = self.bgc_model.tracers["oxygen"].at[0, :, :].set(
+                        jnp.maximum(updated_o2_surf, 0.0)
+                    )
                 
             # Save Output              
             self.save_day(day, self.ds_t.isel(time=day).time.values, par_3d)
 
     def save_day(self, day, current_time, par_3d):
-        # ... (Keep this exactly the same as your current save_day method!) ...
         data_map = {name: arr for name, arr in self.bgc_model.tracers.items()}
         data_map['PAR'] = par_3d
         ds_out = xr.Dataset(coords=self.ds_template.coords)
         for var, arr in data_map.items():
-            ds_out[var] = (self.ds_template.dims, np.where(self.water_mask, arr, np.nan))
+            # FIX: Force JAX array (arr) back into a standard numpy array before feeding to xarray/where
+            arr_np = np.asarray(arr)
+            ds_out[var] = (self.ds_template.dims, np.where(self.water_mask, arr_np, np.nan))
             ds_out[var].attrs = {'units': 'mmol/m3'}
             
         dims_2d = [dim for dim in self.ds_template.dims if dim != 'depth']
         mask_2d = self.water_mask[0, :, :] 
-        ds_out['MLD'] = (dims_2d, np.where(mask_2d, self.mld_2d, np.nan))
+        
+        # Pull mld back to numpy
+        mld_np = np.asarray(self.mld_2d)
+        ds_out['MLD'] = (dims_2d, np.where(mask_2d, mld_np, np.nan))
         ds_out['MLD'].attrs = {'units': 'm', 'long_name': 'Mixed Layer Depth'}
             
         ds_out = ds_out.expand_dims(time=[current_time])
@@ -250,4 +292,6 @@ class OfflineSimulator:
         
         print(f"    -> Saved {fname}")
         if 'nitrate' in data_map:
-            print(f"    -> Nitrate Mean, Min, Max: {np.nanmean(data_map['nitrate']):.1f}, {np.nanmin(data_map['nitrate']):.1f}, {np.nanmax(data_map['nitrate']):.1f}")
+            # Use numpy on the pulled array
+            nit_np = np.asarray(data_map['nitrate'])
+            print(f"    -> Nitrate Mean, Min, Max: {np.nanmean(nit_np):.1f}, {np.nanmin(nit_np):.1f}, {np.nanmax(nit_np):.1f}")

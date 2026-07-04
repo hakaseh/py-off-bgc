@@ -1,530 +1,336 @@
 import numpy as np
 from numba import njit, prange
 import math
-import taichi as ti
+import jax
+import jax.numpy as jnp
 
-@njit(fastmath=True)
+@jax.jit(static_argnums=(8,))
+def advection_neumann_jax(tracer, u, v, w, dz, dt, dx, dy, is_global=False):
+    # Expand 2D metrics to 3D for matrix broadcasting
+    dx_c = dx[None, :, :]
+    dy_c = dy[None, :, :]
+
+    # --- 1. Horizontal Neighbors (Array Rolling) ---
+    # Shift the whole 3D array to simulate looking East, West, North, and South
+    tr_west = jnp.roll(tracer, shift=1, axis=2)
+    tr_east = jnp.roll(tracer, shift=-1, axis=2)
+    dz_west = jnp.roll(dz, shift=1, axis=2)
+    dz_east = jnp.roll(dz, shift=-1, axis=2)
+
+    tr_south = jnp.roll(tracer, shift=1, axis=1)
+    tr_north = jnp.roll(tracer, shift=-1, axis=1)
+    dz_south = jnp.roll(dz, shift=1, axis=1)
+    dz_north = jnp.roll(dz, shift=-1, axis=1)
+
+    # Neumann boundaries: if neighbor is land (dz < 1e-6), use own center value
+    c_west = jnp.where(dz_west > 1e-6, tr_west, tracer)
+    c_east = jnp.where(dz_east > 1e-6, tr_east, tracer)
+    c_south = jnp.where(dz_south > 1e-6, tr_south, tracer)
+    c_north = jnp.where(dz_north > 1e-6, tr_north, tracer)
+
+    # Upwind logic evaluated for the entire grid simultaneously
+    c_up_x = jnp.where(u > 0.0, c_west, c_east)
+    c_up_y = jnp.where(v > 0.0, c_south, c_north)
+
+    term_x = jnp.abs(u) * (tracer - c_up_x) / dx_c
+    term_y = jnp.abs(v) * (tracer - c_up_y) / dy_c
+
+    # --- 2. Vertical Neighbors (Array Slicing) ---
+    # Pad the top and bottom to safely shift the z-axis
+    tr_above = jnp.concatenate([tracer[0:1, :, :], tracer[:-1, :, :]], axis=0)
+    tr_below = jnp.concatenate([tracer[1:, :, :], tracer[-1:, :, :]], axis=0)
+    dz_above = jnp.concatenate([dz[0:1, :, :], dz[:-1, :, :]], axis=0)
+    dz_below = jnp.concatenate([dz[1:, :, :], dz[-1:, :, :]], axis=0)
+
+    # Center vertical velocity from faces
+    w_center = 0.5 * (w[:-1, :, :] + w[1:, :, :])
+
+    c_above = jnp.where(dz_above > 1e-6, tr_above, tracer)
+    c_below = jnp.where(dz_below > 1e-6, tr_below, tracer)
+
+    term_z = jnp.where(w_center > 0.0,
+                       w_center * (tracer - c_below) / dz,
+                       w_center * (c_above - tracer) / dz)
+
+    # --- 3. Total Change ---
+    raw_c = tracer - dt * (term_x + term_y + term_z)
+    tracer_new = jnp.maximum(0.0, raw_c)
+
+    # Mask out land domains
+    return jnp.where(dz > 1e-6, tracer_new, tracer)
+
+@jax.jit
+def calculate_full_kz_jax(mld_2d, rho_3d, dz_3d, k_mld_max=1e-2, k_bg_min=1e-6, k_deep_max=1e-5, k_boundary=1e-4):
+    # Instantly calculate depth for the whole 3D grid
+    current_depth = jnp.cumsum(dz_3d, axis=0)
+    mld_3d = mld_2d[None, :, :]
+
+    # --- 1. Dynamic Boundary Detection ---
+    dz_below = jnp.concatenate([dz_3d[1:, :, :], jnp.zeros_like(dz_3d[-1:, :, :])], axis=0)
+    is_bottom = dz_below <= 1e-6
+
+    dz_west = jnp.roll(dz_3d, shift=1, axis=2)
+    dz_east = jnp.roll(dz_3d, shift=-1, axis=2)
+    dz_south = jnp.roll(dz_3d, shift=1, axis=1)
+    dz_north = jnp.roll(dz_3d, shift=-1, axis=1)
+    
+    is_coast = (dz_west <= 1e-6) | (dz_east <= 1e-6) | (dz_south <= 1e-6) | (dz_north <= 1e-6)
+    is_boundary = is_bottom | is_coast
+
+    local_bg_min = jnp.where(is_boundary, k_boundary, k_bg_min)
+    local_ceiling = jnp.where(is_boundary, k_boundary, k_deep_max)
+
+    # --- 2. Mixing Physics ---
+    # Inside MLD
+    sigma = current_depth / mld_3d
+    shape = sigma * (1.0 - sigma)**2
+    kz_mld = local_bg_min + (k_mld_max * 6.75 * shape)
+
+    # Below MLD (Stratification)
+    rho_below = jnp.concatenate([rho_3d[1:, :, :], rho_3d[-1:, :, :]], axis=0)
+    drho = rho_below - rho_3d
+    dz_eff = 0.5 * (dz_3d + dz_below)
+    
+    # Calculate N2, defaulting bottom-most cells to 1e-7
+    N2 = jnp.maximum((9.81 / 1035.0) * (drho / dz_eff), 1e-7)
+    N2 = N2.at[-1, :, :].set(1e-7)
+
+    k_deep = 1e-11 / jnp.sqrt(N2)
+    kz_deep = jnp.clip(k_deep, local_bg_min, local_ceiling)
+
+    # --- 3. Combine and Mask ---
+    kz_3d = jnp.where(current_depth <= mld_3d, kz_mld, kz_deep)
+    return jnp.where(dz_3d > 1e-6, kz_3d, jnp.nan)
+
+@jax.jit
+def diffusion_robust_jax(tracer, k_z, dz_3d, dt):
+    epsilon = 1e-6
+
+    # Calculate interfaces between layers (k and k+1)
+    delta_z = 0.5 * (dz_3d[:-1, :, :] + dz_3d[1:, :, :])
+    k_face = 0.5 * (k_z[:-1, :, :] + k_z[1:, :, :])
+
+    # Safety Stability Clamp
+    k_max = 0.45 * (delta_z ** 2) / dt
+    k_eff = jnp.minimum(k_face, k_max)
+
+    # Flux calculation for all inner interfaces
+    grad = (tracer[1:, :, :] - tracer[:-1, :, :]) / delta_z
+    flux_inner = jnp.where(delta_z >= epsilon, k_eff * grad, 0.0)
+
+    # Pad top and bottom interfaces with 0 flux (No atmospheric/seafloor escape)
+    zero_flux = jnp.zeros_like(flux_inner[0:1, :, :])
+    flux = jnp.concatenate([zero_flux, flux_inner, zero_flux], axis=0)
+
+    # Divergence: Flux In (bottom) - Flux Out (top)
+    trend = (flux[1:, :, :] - flux[:-1, :, :]) / dz_3d
+
+    # Apply trend to volume cells, ignore land
+    tracer_out = jnp.where(dz_3d >= epsilon, tracer + dt * trend, tracer)
+    return tracer_out
+
+@jax.jit
 def haversine_dist(lon1, lat1, lon2, lat2):
     """
     Calculates distance (meters) between two points on Earth.
-    Inputs in DEGREES.
+    Inputs in DEGREES. Can handle both single numbers and full arrays!
     """
     R = 6371000.0 # Earth Radius (m)
     
-    # Convert to Radians
-    phi1 = np.radians(lat1)
-    phi2 = np.radians(lat2)
-    dphi = np.radians(lat2 - lat1)
-    dlam = np.radians(lon2 - lon1)
+    # Convert to Radians using JAX numpy
+    phi1 = jnp.radians(lat1)
+    phi2 = jnp.radians(lat2)
+    dphi = jnp.radians(lat2 - lat1)
+    dlam = jnp.radians(lon2 - lon1)
     
-    a = np.sin(dphi/2.0)**2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlam/2.0)**2
-    c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
+    a = jnp.sin(dphi/2.0)**2 + jnp.cos(phi1) * jnp.cos(phi2) * jnp.sin(dlam/2.0)**2
+    c = 2.0 * jnp.arctan2(jnp.sqrt(a), jnp.sqrt(1.0 - a))
     
     return R * c
 
-
-@njit(parallel=True, fastmath=True)
+@jax.jit
 def calculate_metrics_curvilinear(lon_2d, lat_2d):
     """
     Calculates dx and dy (meters) for a 2D curvilinear grid.
     dx[j,i] is the distance to the EAST neighbor (i+1).
     dy[j,i] is the distance to the NORTH neighbor (j+1).
     """
-    ny, nx = lon_2d.shape
-    dx = np.zeros((ny, nx))
-    dy = np.zeros((ny, nx))
     
-    # 1. Calculate total number of horizontal grid points
-    n_points = ny * nx
+    # --- DX (Distance along I-axis: East-West) ---
+    # Calculate distances between (i) and (i+1) for all columns except the very last one
+    dx_inner = haversine_dist_jax(
+        lon_2d[:, :-1], lat_2d[:, :-1],  # Base points
+        lon_2d[:, 1:],  lat_2d[:, 1:]    # East neighbors
+    )
     
-    # 2. Single flattened loop for OpenMP thread distribution
-    for p in prange(n_points):
-        # 3. Reconstruct 2D spatial indices (j, i)
-        j = p // nx
-        i = p % nx
-        
-        # --- DX (Distance along I-axis) ---
-        if i < nx - 1:
-            dist_x = haversine_dist(lon_2d[j, i], lat_2d[j, i], 
-                                    lon_2d[j, i+1], lat_2d[j, i+1])
-            dx[j, i] = dist_x
-        else:
-            # COMPUTE directly instead of copying to prevent parallel race conditions
-            dist_x = haversine_dist(lon_2d[j, i-1], lat_2d[j, i-1], 
-                                    lon_2d[j, i], lat_2d[j, i])
-            dx[j, i] = dist_x
-            
-        # --- DY (Distance along J-axis) ---
-        if j < ny - 1:
-            dist_y = haversine_dist(lon_2d[j, i], lat_2d[j, i], 
-                                    lon_2d[j+1, i], lat_2d[j+1, i])
-            dy[j, i] = dist_y
-        else:
-            # COMPUTE directly, and fixed index to j-1 (Southern neighbor)
-            dist_y = haversine_dist(lon_2d[j-1, i], lat_2d[j-1, i], 
-                                    lon_2d[j, i], lat_2d[j, i])
-            dy[j, i] = dist_y
-            
-        # --- Safety Clamp ---
-        # Done inside the loop to avoid a second memory pass over the full array
-        if dx[j, i] < 1.0:
-            dx[j, i] = 1.0
-        if dy[j, i] < 1.0:
-            dy[j, i] = 1.0
-            
+    # For the rightmost boundary, duplicate the previous distance (Numba's 'else' condition)
+    # dx_inner[:, -1:] selects the last calculated column while keeping its 2D shape intact
+    dx_last = dx_inner[:, -1:]
+    
+    # Stitch the inner distances and the boundary boundary column together
+    dx = jnp.concatenate([dx_inner, dx_last], axis=1)
+
+    # --- DY (Distance along J-axis: North-South) ---
+    # Calculate distances between (j) and (j+1) for all rows except the very top one
+    dy_inner = haversine_dist_jax(
+        lon_2d[:-1, :], lat_2d[:-1, :],  # Base points
+        lon_2d[1:, :],  lat_2d[1:, :]    # North neighbors
+    )
+    
+    # For the topmost boundary, duplicate the previous distance
+    dy_last = dy_inner[-1:, :]
+    
+    # Stitch the inner distances and the boundary row together
+    dy = jnp.concatenate([dy_inner, dy_last], axis=0)
+
+    # --- Safety Clamp ---
+    # Instantly clamp all values below 1.0 across the entire grid
+    dx = jnp.maximum(dx, 1.0)
+    dy = jnp.maximum(dy, 1.0)
+
     return dx, dy
+    
+@jax.jit
+def calculate_dz_from_centers(depths_1d):
+    """
+    Calculates cell thicknesses from center depths.
+    Fully vectorized, zero for loops.
+    """
+    # 1. Calculate all inner interfaces simultaneously
+    midpoints = 0.5 * (depths_1d[:-1] + depths_1d[1:])
+    
+    # 2. Define the surface (0.0) and calculate the absolute bottom
+    surface = jnp.array([0.0])
+    bottom = jnp.array([depths_1d[-1] + (depths_1d[-1] - midpoints[-1])])
+    
+    # 3. Stitch them all together (Surface + Midpoints + Bottom)
+    interfaces = jnp.concatenate([surface, midpoints, bottom])
+    
+    # 4. Instant diff across the entire array
+    return jnp.diff(interfaces)
+
+@jax.jit
+def _calculate_grid_metrics_kernel(lon_2d, lat_2d):
+    """
+    The pure-math JAX core. 
+    Requires pre-formatted 2D arrays.
+    """
+    R_EARTH = 6371000.0
+    
+    # JAX has the exact same radians and gradient functions as NumPy
+    lat_rad = jnp.radians(lat_2d)
+    lon_rad = jnp.radians(lon_2d)
+    
+    dlat = jnp.gradient(lat_rad, axis=0)
+    dy = R_EARTH * dlat
+    
+    dlon = jnp.gradient(lon_rad, axis=1)
+    dx = R_EARTH * jnp.cos(lat_rad) * dlon
+    
+    return jnp.abs(dx), jnp.abs(dy)
+
 
 def calculate_grid_metrics(ds):
-    R_EARTH = 6371000.0
+    """
+    The Python Wrapper. 
+    Handles xarray logic, then passes pure arrays to JAX.
+    """
     lat = ds['lat'].values
     lon = ds['lon'].values
-    if lat.ndim == 1: lon_2d, lat_2d = np.meshgrid(lon, lat)
-    else: lon_2d, lat_2d = lon, lat
     
-    lat_rad = np.radians(lat_2d)
-    lon_rad = np.radians(lon_2d)
-    dlat = np.gradient(lat_rad, axis=0)
-    dy = R_EARTH * dlat
-    dlon = np.gradient(lon_rad, axis=1)
-    dx = R_EARTH * np.cos(lat_rad) * dlon
-    return np.abs(dx), np.abs(dy)
-
-def calculate_dz_from_centers(depths_1d):
-    nz = len(depths_1d)
-    interfaces = np.zeros(nz + 1)
-    interfaces[0] = 0.0
-    for k in range(1, nz): interfaces[k] = 0.5 * (depths_1d[k-1] + depths_1d[k])
-    interfaces[nz] = depths_1d[-1] + (depths_1d[-1] - interfaces[nz-1])
-    return np.diff(interfaces)
-
-
-@njit(parallel=True, fastmath=True)
-def calculate_w(u, v, dz_3d, dx, dy):
-    """
-    Calculates W integrating Surface -> Bottom (j, i, k order).
-    Includes Linear Correction to force W_bottom = 0.
-    """
-    nz, ny, nx = u.shape
-    w = np.zeros((nz + 1, ny, nx))
-
-    # 1. Calculate the exact number of inner domain points
-    n_j = ny - 2  # Equivalent to range(1, ny - 1)
-    n_i = nx - 2  # Equivalent to range(1, nx - 1)
-    n_points = n_j * n_i
-
-    # 2. Single flattened loop for OpenMP thread distribution
-    for p in prange(n_points):
-        # 3. Reconstruct spatial indices with a +1 offset to skip boundary walls
-        j = 1 + (p // n_i)
-        i = 1 + (p % n_i)
-            
-        # Skip land columns
-        if dz_3d[0, j, i] <= 1e-6:
-            continue
-
-        dx_c = dx[j, i]
-        dy_c = dy[j, i]
-        current_w = 0.0
+    # Handle the shape logic in standard Python
+    if lat.ndim == 1: 
+        lon_2d, lat_2d = jnp.meshgrid(lon, lat)
+    else: 
+        lon_2d, lat_2d = lon, lat
         
-        # --- PHASE 1: INTEGRATE DOWNWARD ---
-        for k in range(nz):
-            dz_c = dz_3d[k, j, i]
-            
-            # If we hit the seafloor inside the column
-            if dz_c <= 1e-6:
-                w[k+1, j, i] = 0.0
-                continue
+    # Call the compiled XLA math
+    return _calculate_grid_metrics_kernel(lon_2d, lat_2d)
 
-            # Face Velocities
-            # (Check neighbors for land boundaries)
-            u_west  = 0.5 * (u[k, j, i-1] + u[k, j, i]) if dz_3d[k, j, i-1] > 1e-6 else 0.0
-            u_east  = 0.5 * (u[k, j, i] + u[k, j, i+1]) if dz_3d[k, j, i+1] > 1e-6 else 0.0
-            v_south = 0.5 * (v[k, j-1, i] + v[k, j, i]) if dz_3d[k, j-1, i] > 1e-6 else 0.0
-            v_north = 0.5 * (v[k, j, i] + v[k, j+1, i]) if dz_3d[k, j+1, i] > 1e-6 else 0.0
-            
-            # Divergence
-            div_h = ((u_east - u_west) / dx_c) + ((v_north - v_south) / dy_c)
-            
-            # Update W (Accumulate)
-            current_w = current_w + (div_h * dz_c)
-            w[k+1, j, i] = current_w
-
-        # --- PHASE 2: LINEAR CORRECTION ---
-        # The bottom value (w[nz]) should be 0. If not, remove the error.
-        bottom_error = w[nz, j, i]
-        
-        if abs(bottom_error) > 1e-10:
-            for k in range(1, nz + 1):
-                # Linearly scale the correction from Surface (0) to Bottom (1)
-                weight = float(k) / float(nz)
-                w[k, j, i] -= bottom_error * weight
-                
-    return w
-
-
-@njit(parallel=True, fastmath=True)
-def calculate_w_bottom_up(u, v, dz_3d, dx, dy):
-    """
-    Calculates W integrating Bottom -> Surface.
-    Bypasses the need for SSH time derivatives.
-    W at the seafloor is strictly forced to 0.0.
-    """
-    nz, ny, nx = u.shape
-    
-    # w array has nz + 1 levels (faces of the cells)
-    # w[nz] is the absolute bottom, w[0] is the surface
-    w = np.zeros((nz + 1, ny, nx))
-
-    n_j = ny - 2  
-    n_i = nx - 2  
-    n_points = n_j * n_i
-
-    for p in prange(n_points):
-        j = 1 + (p // n_i)
-        i = 1 + (p % n_i)
-            
-        # Skip land columns entirely
-        if dz_3d[0, j, i] <= 1e-6:
-            continue
-
-        dx_c = dx[j, i]
-        dy_c = dy[j, i]
-        
-        # Start at the seafloor with 0 velocity
-        current_w = 0.0
-        
-        # --- INTEGRATE UPWARD (k goes from nz-1 down to 0) ---
-        for k in range(nz - 1, -1, -1):
-            dz_c = dz_3d[k, j, i]
-            
-            # If we are below the seafloor in a stepped-bathymetry model
-            if dz_c <= 1e-6:
-                w[k, j, i] = 0.0
-                continue
-
-            # Face Velocities
-            u_west  = 0.5 * (u[k, j, i-1] + u[k, j, i]) if dz_3d[k, j, i-1] > 1e-6 else 0.0
-            u_east  = 0.5 * (u[k, j, i] + u[k, j, i+1]) if dz_3d[k, j, i+1] > 1e-6 else 0.0
-            v_south = 0.5 * (v[k, j-1, i] + v[k, j, i]) if dz_3d[k, j-1, i] > 1e-6 else 0.0
-            v_north = 0.5 * (v[k, j, i] + v[k, j+1, i]) if dz_3d[k, j+1, i] > 1e-6 else 0.0
-            
-            # Horizontal Divergence
-            div_h = ((u_east - u_west) / dx_c) + ((v_north - v_south) / dy_c)
-            
-            # Update W: W_top = W_bottom - (Divergence * dz)
-            current_w = current_w - (div_h * dz_c)
-            
-            # Assign to the TOP face of the current cell
-            w[k, j, i] = current_w
-                
-    return w
-
-
-@njit(parallel=True, fastmath=True)
+@jax.jit
 def calculate_w_rigid_lid(u, v, dz_3d, dx, dy):
-    """
-    Top-Down integration with linear correction.
-    Properly detects actual bathymetry (k_bottom) to force
-    seafloor W to exactly 0.0 in shallow regions.
-    """
     nz, ny, nx = u.shape
-    w = np.zeros((nz + 1, ny, nx))
 
-    n_j = ny - 2  
-    n_i = nx - 2  
-    n_points = n_j * n_i
+    # Expand 2D grid spacing to 3D for matrix broadcasting
+    dx_c = dx[None, :, :]
+    dy_c = dy[None, :, :]
 
-    for p in prange(n_points):
-        j = 1 + (p // n_i)
-        i = 1 + (p % n_i)
-            
-        if dz_3d[0, j, i] <= 1e-6:
-            continue
+    # --- 1. HORIZONTAL DIVERGENCE ---
+    # Shift arrays to get raw face velocities
+    u_west_raw  = 0.5 * (jnp.roll(u, shift=1, axis=2) + u)
+    u_east_raw  = 0.5 * (u + jnp.roll(u, shift=-1, axis=2))
+    v_south_raw = 0.5 * (jnp.roll(v, shift=1, axis=1) + v)
+    v_north_raw = 0.5 * (v + jnp.roll(v, shift=-1, axis=1))
 
-        # --- 1. FIND THE TRUE SEAFLOOR ---
-        k_bottom = nz
-        for k in range(nz):
-            if dz_3d[k, j, i] <= 1e-6:
-                k_bottom = k
-                break
+    # Mask face velocities if a neighbor is land (dz <= 1e-6)
+    dz_west  = jnp.roll(dz_3d, shift=1, axis=2)
+    dz_east  = jnp.roll(dz_3d, shift=-1, axis=2)
+    dz_south = jnp.roll(dz_3d, shift=1, axis=1)
+    dz_north = jnp.roll(dz_3d, shift=-1, axis=1)
 
-        dx_c = dx[j, i]
-        dy_c = dy[j, i]
-        
-        # 2. Start at surface with 0 velocity
-        current_w = 0.0
-        
-        # 3. Integrate Downward ONLY to the true seafloor
-        for k in range(k_bottom):
-            dz_c = dz_3d[k, j, i]
+    u_west  = jnp.where(dz_west > 1e-6, u_west_raw, 0.0)
+    u_east  = jnp.where(dz_east > 1e-6, u_east_raw, 0.0)
+    v_south = jnp.where(dz_south > 1e-6, v_south_raw, 0.0)
+    v_north = jnp.where(dz_north > 1e-6, v_north_raw, 0.0)
 
-            u_west  = 0.5 * (u[k, j, i-1] + u[k, j, i]) if dz_3d[k, j, i-1] > 1e-6 else 0.0
-            u_east  = 0.5 * (u[k, j, i] + u[k, j, i+1]) if dz_3d[k, j, i+1] > 1e-6 else 0.0
-            v_south = 0.5 * (v[k, j-1, i] + v[k, j, i]) if dz_3d[k, j-1, i] > 1e-6 else 0.0
-            v_north = 0.5 * (v[k, j, i] + v[k, j+1, i]) if dz_3d[k, j+1, i] > 1e-6 else 0.0
-            
-            div_h = ((u_east - u_west) / dx_c) + ((v_north - v_south) / dy_c)
-            
-            current_w = current_w + (div_h * dz_c)
-            w[k+1, j, i] = current_w
+    # Calculate Horizontal Divergence
+    div_h = ((u_east - u_west) / dx_c) + ((v_north - v_south) / dy_c)
 
-        # --- 4. TRUE LINEAR CORRECTION ---
-        # The true bottom value must be 0. 
-        bottom_error = w[k_bottom, j, i]
-        
-        if abs(bottom_error) > 1e-10:
-            for k in range(1, k_bottom + 1):
-                # Weight increases from 0 (surface) to 1 (seafloor)
-                weight = float(k) / float(k_bottom)
-                w[k, j, i] -= bottom_error * weight
-                
-    return w
-
-
-@ti.kernel
-def _advection_neumann_kernel(
-    tracer: ti.types.ndarray(dtype=ti.f32),
-    tracer_new: ti.types.ndarray(dtype=ti.f32),
-    u: ti.types.ndarray(dtype=ti.f32),
-    v: ti.types.ndarray(dtype=ti.f32),
-    w: ti.types.ndarray(dtype=ti.f32),
-    dz: ti.types.ndarray(dtype=ti.f32),
-    dx: ti.types.ndarray(dtype=ti.f32),
-    dy: ti.types.ndarray(dtype=ti.f32),
-    dt: ti.f32,  # Also force the scalar dt to 32-bit
-    is_global: ti.i32
-):
-    nz = tracer.shape[0]
-    ny = tracer.shape[1]
-    nx = tracer.shape[2]
+    # --- 2. INTEGRATE DOWNWARD ---
+    # Change in W per layer (delta W). Zero out contributions from land cells.
+    delta_w = jnp.where(dz_3d > 1e-6, div_h * dz_3d, 0.0)
     
-    # Taichi automatically parallelizes this 3D loop across thousands of GPU cores
-    for k, j, i in ti.ndrange(nz, ny, nx):
-        
-        # 1. Replicate the Numba spatial boundary masking (i_start, i_end, n_j)
-        is_valid_j = (j >= 1) and (j < ny - 1)
-        is_valid_i = True
-        if is_global == 0:
-            is_valid_i = (i >= 1) and (i < nx - 1)
-            
-        if is_valid_j and is_valid_i and dz[k, j, i] > 1e-6:
-            dx_c = dx[j, i]
-            dy_c = dy[j, i]
-            dz_c = dz[k, j, i]
-            c = tracer[k, j, i]
-
-            # --- 1. Horizontal ---
-            u_val = u[k, j, i]
-            v_val = v[k, j, i]
-            
-            i_up = i - 1 if u_val > 0.0 else i + 1
-            j_up = j - 1 if v_val > 0.0 else j + 1
-            
-            if is_global == 1:
-                if i_up < 0:
-                    i_up = nx - 1
-                elif i_up >= nx:
-                    i_up = 0
-            
-            # Safe neighbor assignment
-            c_up_x = tracer[k, j, i_up] if dz[k, j, i_up] > 1e-6 else c
-            c_up_y = tracer[k, j_up, i] if dz[k, j_up, i] > 1e-6 else c
-            
-            term_x = ti.abs(u_val) * (c - c_up_x) / dx_c
-            term_y = ti.abs(v_val) * (c - c_up_y) / dy_c
-
-            # --- 2. Vertical ---
-            w_val = 0.5 * (w[k, j, i] + w[k+1, j, i])
-            
-            # Nested IFs prevent GPU out-of-bounds indexing crashes
-            c_below = c
-            if k < nz - 1:
-                if dz[k+1, j, i] > 1e-6:
-                    c_below = tracer[k+1, j, i]
-                    
-            c_above = c
-            if k > 0:
-                if dz[k-1, j, i] > 1e-6:
-                    c_above = tracer[k-1, j, i]
-
-            term_z = 0.0
-            if w_val > 0.0:
-                term_z = w_val * (c - c_below) / dz_c
-            else:
-                term_z = w_val * (c_above - c) / dz_c
-
-            # --- 3. Total Change ---
-            raw_c = c - dt * (term_x + term_y + term_z)
-            tracer_new[k, j, i] = ti.max(0.0, raw_c)
-
-# --- PYTHON WRAPPER ---
-# Keep your API identical to the Numba version!
-def advection_neumann(tracer, u, v, w, dz, dt, dx, dy, is_global=False):
-    # Convert all incoming arrays to float32 for the GPU
-    tracer_f32 = tracer.astype(np.float32)
-    u_f32 = u.astype(np.float32)
-    v_f32 = v.astype(np.float32)
-    w_f32 = w.astype(np.float32)
-    dz_f32 = dz.astype(np.float32)
-    dx_f32 = dx.astype(np.float32)
-    dy_f32 = dy.astype(np.float32)
+    # Cumulative sum replaces the downward for-loop. 
+    w_accum = jnp.cumsum(delta_w, axis=0)
     
-    # Create the output array as float32
-    tracer_new_f32 = tracer_f32.copy()
-    
-    # Run the GPU kernel
-    _advection_neumann_kernel(
-        tracer_f32, tracer_new_f32, u_f32, v_f32, w_f32, dz_f32, dx_f32, dy_f32, float(dt), 1 if is_global else 0
-    )
-    
-    return tracer_new_f32
+    # Pad the surface layer with 0.0 to get the correct (nz+1) face interfaces
+    w_surface = jnp.zeros((1, ny, nx), dtype=w_accum.dtype)
+    w_raw = jnp.concatenate([w_surface, w_accum], axis=0)
 
-@ti.kernel
-def _calculate_full_kz_kernel(
-    mld_2d: ti.types.ndarray(dtype=ti.f32),
-    rho_3d: ti.types.ndarray(dtype=ti.f32),
-    dz_3d: ti.types.ndarray(dtype=ti.f32),
-    kz_3d: ti.types.ndarray(dtype=ti.f32),
-    k_mld_max: ti.f32,
-    k_bg_min: ti.f32,
-    k_deep_max: ti.f32
-):
-    nz = dz_3d.shape[0]
-    ny = dz_3d.shape[1]
-    nx = dz_3d.shape[2]
-    
-    g = 9.81
-    rho_0 = 1035.0
-    
-    # Thread over the 2D surface grid (each thread gets one column)
-    for j, i in ti.ndrange(ny, nx):
-        mld = mld_2d[j, i]
-        
-        # Note: Taichi uses ti.math.isnan() instead of np.isnan() inside kernels
-        if ti.math.isnan(mld) or dz_3d[0, j, i] < 1e-6:
-            for k in range(nz):
-                kz_3d[k, j, i] = ti.math.nan
-            continue
-            
-        current_depth = 0.0
-        
-        for k in range(nz):
-            dz = dz_3d[k, j, i]
-            current_depth += dz
-            
-            # --- REGION 1: INSIDE MLD ---
-            if current_depth <= mld:
-                sigma = current_depth / mld
-                shape = sigma * (1.0 - sigma)**2
-                kz_3d[k, j, i] = k_bg_min + (k_mld_max * 6.75 * shape)
-            
-            # --- REGION 2: BELOW MLD ---
-            else:
-                N2 = 1e-7
-                if k < nz - 1:
-                    drho = rho_3d[k+1, j, i] - rho_3d[k, j, i]
-                    dz_eff = 0.5 * (dz_3d[k, j, i] + dz_3d[k+1, j, i])
-                    local_N2 = (g / rho_0) * (drho / dz_eff)
-                    N2 = ti.max(local_N2, 1e-7)
-                
-                k_deep = 1e-11 / ti.math.sqrt(N2)
-                
-                kz_3d[k, j, i] = ti.min(ti.max(k_deep, k_bg_min), k_deep_max)
+    # --- 3. TRUE SEAFLOOR AND LINEAR CORRECTION ---
+    # Counting the wet layers exactly equals the k_bottom index!
+    k_bottom = jnp.sum(dz_3d > 1e-6, axis=0)
 
+    # The error at the bottom is simply the total sum of delta_w down the column
+    bottom_error = w_accum[-1, :, :]
 
-def calculate_full_kz(mld_2d, rho_3d, dz_3d, k_mld_max=1e-2, k_bg_min=1e-9, k_deep_max=1e-5):
-    # Downcast to 32-bit for the Metal GPU
-    mld_f32 = mld_2d.astype(np.float32)
-    rho_f32 = rho_3d.astype(np.float32)
-    dz_f32  = dz_3d.astype(np.float32)
-    kz_out_f32 = np.zeros_like(dz_f32)
-    
-    _calculate_full_kz_kernel(
-        mld_f32, rho_f32, dz_f32, kz_out_f32,
-        float(k_mld_max), float(k_bg_min), float(k_deep_max)
-    )
-    
-    return kz_out_f32
+    # Create a 3D vertical index grid (0 to nz)
+    k_indices = jnp.arange(nz + 1)[:, None, None]
 
-@ti.kernel
-def _diffusion_robust_kernel(
-    tracer: ti.types.ndarray(dtype=ti.f32),
-    k_z: ti.types.ndarray(dtype=ti.f32),
-    dz_3d: ti.types.ndarray(dtype=ti.f32),
-    tracer_out: ti.types.ndarray(dtype=ti.f32),
-    dt: ti.f32
-):
-    nz = tracer.shape[0]
-    ny = tracer.shape[1]
-    nx = tracer.shape[2]
-    epsilon = 1e-6
-    
-    # Thread over the 2D surface grid
-    for j, i in ti.ndrange(ny, nx):
-        
-        if ti.math.isnan(tracer[0, j, i]):
-            for k in range(nz):
-                tracer_out[k, j, i] = ti.math.nan
-            continue
+    # Calculate linear correction weights (k / k_bottom)
+    # Prevent division-by-zero on pure land columns by defaulting to 0.0
+    weight = jnp.where(k_bottom > 0, k_indices / k_bottom, 0.0)
 
-        # Surface flux is always zero (rigid lid / no atmospheric loss)
-        flux_top = 0.0
-        
-        # Sequentially walk down the column
-        for k in range(nz):
-            vol = dz_3d[k, j, i]
-            flux_bottom = 0.0
-            
-            # 1. Calculate flux at the bottom interface of this cell
-            if k < nz - 1:
-                delta_z = 0.5 * (dz_3d[k, j, i] + dz_3d[k+1, j, i])
-                
-                if delta_z >= epsilon:
-                    k_face = 0.5 * (k_z[k, j, i] + k_z[k+1, j, i])
-                    k_max = 0.45 * (delta_z * delta_z) / dt
-                    
-                    k_eff = k_max if k_face > k_max else k_face
-                    
-                    grad = (tracer[k+1, j, i] - tracer[k, j, i]) / delta_z
-                    flux_bottom = k_eff * grad
+    # Apply the linear correction simultaneously to all cells
+    w_corrected = w_raw - (bottom_error[None, :, :] * weight)
 
-            # 2. Update the cell using Flux In (bottom) and Flux Out (top)
-            if vol < epsilon:
-                tracer_out[k, j, i] = tracer[k, j, i]
-            else:
-                trend = (flux_bottom - flux_top) / vol
-                tracer_out[k, j, i] = tracer[k, j, i] + dt * trend
-                
-            # 3. Pass this cell's bottom flux down to become the next cell's top flux
-            flux_top = flux_bottom
+    # --- 4. MASKING ---
+    # 1. Force W to 0.0 strictly below the true seafloor
+    valid_w_mask = k_indices <= k_bottom[None, :, :]
+    w_final = jnp.where(valid_w_mask, w_corrected, 0.0)
 
+    # 2. Force W to 0.0 on the outer lateral boundaries (replicating Numba's skip boundaries)
+    mask_y = (jnp.arange(ny) > 0) & (jnp.arange(ny) < ny - 1)
+    mask_x = (jnp.arange(nx) > 0) & (jnp.arange(nx) < nx - 1)
+    inner_domain_mask = mask_y[:, None] & mask_x[None, :]
 
-def diffusion_robust(tracer, k_z, dz_3d, dt):
-    tracer_f32 = tracer.astype(np.float32)
-    kz_f32 = k_z.astype(np.float32)
-    dz_f32 = dz_3d.astype(np.float32)
-    tracer_out_f32 = tracer_f32.copy()
-    
-    _diffusion_robust_kernel(
-        tracer_f32, kz_f32, dz_f32, tracer_out_f32, float(dt)
-    )
-    
-    return tracer_out_f32
+    return jnp.where(inner_domain_mask[None, :, :], w_final, 0.0)
 
-
-def create_restoring_weights(water_mask, sponge_width, tau_lateral, tau_bottom, dt, is_global=False):
+def create_restoring_weights(water_mask, sponge_width, dt, tau_lateral=86400.0, tau_bottom=86400.0*30, tau_coast=86400.0, is_global=False):
     """
     Creates a 3D rate array (1/sec) for restoring.
-    It combines Lateral Sponge (Fast) and Seafloor Restoring (Slow).
+    Combines Lateral Sponge (Fast), Seafloor Restoring (Slow), 
+    and Coastal Restoring (for terrestrial nutrient runoff).
     """
     nz, ny, nx = water_mask.shape
     
     # 1. Initialize Rates with Zeros
     restore_rate = np.zeros((nz, ny, nx))
     
-    # Define Rates
+    # Define Rates (1/sec)
     rate_lateral = 1.0 / tau_lateral
     rate_bottom  = 1.0 / tau_bottom
+    rate_coast   = 1.0 / tau_coast
     
     # --- A. LATERAL SPONGE (N/S/E/W) ---
     # Taper from edge (rate_lateral) to interior (0.0)
@@ -542,44 +348,55 @@ def create_restoring_weights(water_mask, sponge_width, tau_lateral, tau_bottom, 
             restore_rate[:, :, i]      = np.maximum(restore_rate[:, :, i], val)       # West
             restore_rate[:, :, -(i+1)] = np.maximum(restore_rate[:, :, -(i+1)], val)  # East
 
-    # --- B. SEAFLOOR RESTORING (The Fix) ---
+    # --- B. SEAFLOOR RESTORING ---
     # We iterate over 2D surface to find the deepest wet cell k
-    # (Looping over 2D surface is fast enough for setup)
     for j in prange(ny):
         for i in range(nx):
-            # Extract the column
             col = water_mask[:, j, i]
-            
-            # Skip if Land (all False)
             if not np.any(col):
                 continue
                 
-            # Find the deepest wet index
-            # np.where returns indices where condition is True. We take the last one.
             k_bot = np.where(col)[0][-1]
-            
-            # Apply Bottom Rate
-            # CRITICAL: Do we override the Sponge?
-            # Rule: If the bottom is effectively part of the "Sponge Wall" (e.g. shallow shelf),
-            # we should keep the FASTER rate (Lateral).
-            # If it's the deep ocean floor, we add the SLOWER rate (Bottom).
-            
-            # Let's take the maximum of existing sponge rate vs bottom rate
-            # This ensures fast restoring at boundaries, slow restoring at deep bottom.
-            restore_rate[k_bot, j, i] = np.max([restore_rate[k_bot, j, i], rate_bottom])
+            restore_rate[k_bot, j, i] = np.maximum(restore_rate[k_bot, j, i], rate_bottom)
 
+    # --- C. COASTAL RESTORING (Nutrient Runoff Proxy) ---
+    # River runoff is buoyant and enters the ocean at the surface. 
+    # Therefore, we only detect coastlines and apply restoring to the surface layer (k=0).
+    
+    coastal_mask_2d = np.zeros_like(water_mask[0], dtype=bool)
+    surface_water = water_mask[0]
+    
+    # Matrix shift to detect land in all 4 compass directions
+    coastal_mask_2d[1:, :] |= (~surface_water[:-1, :])  # Check South
+    coastal_mask_2d[:-1, :] |= (~surface_water[1:, :])  # Check North
+    coastal_mask_2d[:, 1:] |= (~surface_water[:, :-1])  # Check West
+    coastal_mask_2d[:, :-1] |= (~surface_water[:, 1:])  # Check East
+    
+    # A coastal cell MUST actually be water
+    coastal_mask_2d &= surface_water
+    
+    # Apply the coastal rate ONLY to the surface layer (k=0).
+    # np.maximum ensures that if a coastal cell is ALSO inside the lateral sponge, the faster rate wins.
+    restore_rate[0] = np.where(
+        coastal_mask_2d, 
+        np.maximum(restore_rate[0], rate_coast), 
+        restore_rate[0]
+    )
+
+    # --- FINAL SCALING ---
     # Multiply by DT to get the "nudge fraction" per step
     # Result is a 3D array of alpha values: C_new = C_old + alpha * (C_target - C_old)
     nudge_coeff = restore_rate * dt
     
-    # Stability Check: alpha cannot exceed 1.0
+    # Stability Check: alpha cannot exceed 1.0 (100% replacement per timestep)
     nudge_coeff = np.minimum(nudge_coeff, 1.0)
     
-    # Mask out land finally (just to be safe)
+    # Mask out land finally to ensure dry cells remain strictly 0.0
     nudge_coeff = np.where(water_mask, nudge_coeff, 0.0)
     
     return nudge_coeff
 
+#Deprecated. To be deleted!
 @njit(parallel=True, fastmath=True)
 def mixing_convective(tracer, rho_3d, dz_3d, delta_rho_mld):
     """
@@ -672,124 +489,92 @@ def mixing_convective(tracer, rho_3d, dz_3d, delta_rho_mld):
     return tracer_out
 
 
-@njit(parallel=True, fastmath=True)
+@jax.jit
 def calculate_mld(rho_3d, dz_3d, delta_rho_mld):
-    """
-    Calculates Mixed Layer Depth (m) using the standard 10m reference depth.
-    Bypasses thin surface freshwater/diurnal lenses.
-    """
     nz, ny, nx = rho_3d.shape
-    mld_2d = np.zeros((ny, nx))
     
-    # 1. Calculate total number of horizontal grid points
-    n_points = ny * nx
+    # --- 1. Calculate Depths ---
+    # The depth at the BOTTOM of each cell
+    bottom_depths_3d = jnp.cumsum(dz_3d, axis=0)
     
-    # 2. Single flattened loop for maximum OpenMP thread distribution
-    for p in prange(n_points):
-        # 3. Reconstruct 2D spatial indices (j, i) from the 1D index (p)
-        j = p // nx
-        i = p % nx
-        
-        # Land Check
-        if dz_3d[0, j, i] < 1e-6 or np.isnan(rho_3d[0, j, i]):
-            mld_2d[j, i] = np.nan
-            continue
-        
-        # 1. Find the reference layer (closest to 10m depth)
-        depth_accum = 0.0
-        k_ref = 0
-        for k in range(nz):
-            depth_accum += dz_3d[k, j, i]
-            if depth_accum >= 10.0:
-                k_ref = k
-                break
-                
-        rho_ref = rho_3d[k_ref, j, i]
-        
-        # 2. Calculate MLD checking against the 10m reference
-        current_depth = 0.0
-        for k in range(nz):
-            current_depth += dz_3d[k, j, i]
-            
-            # Only check for the threshold once we are at or below the 10m reference
-            if k >= k_ref:
-                # If the water becomes significantly heavier than the 10m water
-                if (rho_3d[k, j, i] - rho_ref) > delta_rho_mld:
-                    # We hit the pycnocline! Back up to the top of this layer and break.
-                    current_depth -= dz_3d[k, j, i]
-                    break
-                    
-        # Failsafe: if the whole column is mixed, it will just return the domain bottom
-        mld_2d[j, i] = current_depth
-        
-    return mld_2d
+    # The depth at the TOP of each cell
+    top_depths_3d = bottom_depths_3d - dz_3d
+    
+    # --- 2. Find the 10m Reference Layer ---
+    # jnp.argmax on a boolean array returns the first index where the statement is True
+    k_ref_2d = jnp.argmax(bottom_depths_3d >= 10.0, axis=0)
+    
+    # Extract the reference density for every column simultaneously
+    # (We add [None, ...] to match 3D dimensions, then [0] to flatten it back to 2D)
+    rho_ref_2d = jnp.take_along_axis(rho_3d, k_ref_2d[None, :, :], axis=0)[0]
+    
+    # --- 3. Find the MLD (Pycnocline Threshold) ---
+    # Create a 3D index grid to ensure we only check cells at or below k_ref
+    k_indices = jnp.arange(nz)[:, None, None]
+    is_valid_search_depth = k_indices >= k_ref_2d[None, :, :]
+    
+    # Find all cells that exceed the density threshold
+    is_dense = (rho_3d - rho_ref_2d[None, :, :]) > delta_rho_mld
+    
+    # Combine the conditions: Must be below 10m AND exceed threshold
+    pycnocline_mask = is_dense & is_valid_search_depth
+    
+    # Find the FIRST layer in each column where the mask is True
+    k_mld_2d = jnp.argmax(pycnocline_mask, axis=0)
+    
+    # Extract the depth at the TOP of that specific layer
+    mld_if_found = jnp.take_along_axis(top_depths_3d, k_mld_2d[None, :, :], axis=0)[0]
+    
+    # --- 4. Handle Edge Cases & Masking ---
+    # Failsafe: Did the column actually hit the pycnocline, or is it fully mixed?
+    hit_pycnocline = jnp.any(pycnocline_mask, axis=0)
+    
+    # If fully mixed, return the total depth of the water column
+    total_water_depth = jnp.sum(jnp.where(dz_3d > 1e-6, dz_3d, 0.0), axis=0)
+    mld_raw = jnp.where(hit_pycnocline, mld_if_found, total_water_depth)
+    
+    # Land check: Mask out columns with no water or NaN surface densities
+    is_land = (dz_3d[0] < 1e-6) | jnp.isnan(rho_3d[0])
+    mld_final = jnp.where(is_land, jnp.nan, mld_raw)
+    
+    return mld_final
 
-
-@njit(parallel=True, fastmath=True)
+@jax.jit
 def calc_o2_flux(o2_surf, o2_saturation, temp_surf, wind_speed, ice_fraction, dz_surf, dt_step):
     """
     Calculates the air-sea flux of Dissolved Oxygen for the surface layer (k=0).
-    Uses Wanninkhof (2014) for piston velocity with dynamic Schmidt numbers, 
-    and applies a sea ice mask.
-    
-    Args:
-        o2_surf: 2D array of surface O2 (mmol/m3)
-        o2_saturation: 2D array of O2 saturation (mmol/m3) calculated via gsw
-        temp_surf: 2D array of Sea Surface Temperature (Celsius)
-        wind_speed: 2D array of 10m wind speed (m/s)
-        ice_fraction: 2D array of sea ice concentration (0.0 to 1.0)
-        dz_surf: 2D array of surface grid cell thickness (m)
-        dt_step: Time step (seconds)
-        
-    Returns:
-        o2_updated: 2D array of updated surface O2 concentrations
+    Fully vectorized for JAX.
     """
-    ny, nx = o2_surf.shape
     
-    # Use .copy() to preserve land values/masks safely
-    # (Doing this outside the prange loop is completely safe and fast)
-    o2_updated = o2_surf.copy()
+    # --- 1. Schmidt Number (Wanninkhof 2014) ---
+    sc_o2 = (1920.4 
+             - 135.6 * temp_surf 
+             + 5.2122 * (temp_surf**2) 
+             - 0.10939 * (temp_surf**3) 
+             + 0.00093777 * (temp_surf**4))
+             
+    # Safety clamp across the entire array
+    sc_o2 = jnp.maximum(sc_o2, 1.0) 
     
-    # 1. Calculate total number of horizontal grid points
-    n_points = ny * nx
+    # --- 2. Piston Velocity (kw) ---
+    kw_cm_hr = 0.251 * (wind_speed**2) * jnp.power((sc_o2 / 660.0), -0.5)
     
-    # 2. Single flattened loop for maximum OpenMP thread distribution
-    for p in prange(n_points):
-        # 3. Reconstruct 2D spatial indices (j, i) from the 1D index (p)
-        j = p // nx
-        i = p % nx
-        
-        if dz_surf[j, i] < 1e-6:
-            continue # Skip land
-            
-        o2_local = o2_surf[j, i]
-        sat_local = o2_saturation[j, i]
-        temp_local = temp_surf[j, i]
-        wind_local = wind_speed[j, i]
-        ice_local = ice_fraction[j, i]
-        
-        # 1. Calculate Schmidt number for O2 (Wanninkhof 2014)
-        # Valid for seawater from -2 to 40 Celsius
-        sc_o2 = (1920.4 
-                 - 135.6 * temp_local 
-                 + 5.2122 * (temp_local**2) 
-                 - 0.10939 * (temp_local**3) 
-                 + 0.00093777 * (temp_local**4))
-                 
-        sc_o2 = max(sc_o2, 1.0) # Safety clamp to prevent negative/zero division
-        
-        # 2. Calculate Piston Velocity (kw) in cm/hr
-        kw_cm_hr = 0.251 * (wind_local**2) * ((sc_o2 / 660.0)**-0.5)
-        
-        # Convert kw from cm/hr to m/s
-        kw_m_s = kw_cm_hr * (1.0 / 100.0) * (1.0 / 3600.0)
-        
-        # 3. Calculate Flux (mmol O2 / m2 / s)
-        # Scale by open water fraction so solid ice prevents gas exchange
-        open_water_fraction = max(0.0, 1.0 - ice_local)
-        flux = kw_m_s * (sat_local - o2_local) * open_water_fraction
-        
-        # 4. Apply flux to the surface layer concentration
-        o2_updated[j, i] = o2_local + (flux / dz_surf[j, i]) * dt_step
+    # Convert kw from cm/hr to m/s
+    kw_m_s = kw_cm_hr * (1.0 / 100.0) * (1.0 / 3600.0)
+    
+    # --- 3. Calculate Flux ---
+    # Scale by open water fraction so solid ice prevents gas exchange
+    open_water_fraction = jnp.maximum(0.0, 1.0 - ice_fraction)
+    flux = kw_m_s * (o2_saturation - o2_surf) * open_water_fraction
+    
+    # --- 4. Apply Flux & Mask Land ---
+    # Create a safe divisor to prevent division-by-zero on land pixels
+    dz_safe = jnp.where(dz_surf > 1e-6, dz_surf, 1.0)
+    
+    # Calculate the raw updated oxygen
+    raw_updated = o2_surf + (flux / dz_safe) * dt_step
+    
+    # Apply the final land mask: if it's ocean, keep the update; if land, return the original
+    o2_updated = jnp.where(dz_surf > 1e-6, raw_updated, o2_surf)
 
     return o2_updated

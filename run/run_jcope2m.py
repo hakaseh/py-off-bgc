@@ -16,42 +16,45 @@ import xarray as xr
 from source.simulator import OfflineSimulator
 
 # --- 1. CONFIGURATION ---
-exp_name = "BRAN2020"
+exp_name = "JCOPE2M"
 bgc_model_choice = "FENNEL06"
-dt_in_sec = 1200
+dt_in_sec = 900
 mld_choice = 0.03 
 sponge_choice = 1
 tau_lateral_choice = 86400.0 * 1
 tau_bottom_choice = 86400.0 * 30
 tau_coast_choice = 86400.0 * 1
 is_global_choice = False
-restart_file = None #f"output/{bgc_model_choice}_{exp_name}/restart.nc"
+restart_file = None #f"output/{exp_name}/{bgc_model_choice}/output_JCOPE2M_FENNEL06_20160131.nc"
 clim_file = None #f"climatology/{exp_name}/GLODAPv2.2016b.ALL_{exp_name}.nc"
 glodap_dir = "climatology/GLODAPv2.2016b.MappedClimatologies/"
 
 # Domain Slicing
-lat_range   = slice(17, 50)
-lon_range   = slice(117, 150)
-depth_range = slice(None, 1000) #0, 300)
-time_range  = slice("20160101", "20231231")
+lat_range   = slice(17,50)
+lon_range   = slice(117,150)
+depth_range = slice(None, 1000)
+time_range  = slice(None, None)
 
 # --- 2. LOAD PHYSICAL DATA (CMEMS SPECIFIC) ---
 print("Loading raw datasets...")
-ds_t = xr.open_mfdataset(f'input/{exp_name}/ocean_temp_201*.nc', chunks={"time": 1},
-                         drop_variables=["Time_bounds", "average_DT"])["temp"].rename(
-    {"xt_ocean":"lon","yt_ocean":"lat","st_ocean":"depth","Time":"time"})
-ds_s = xr.open_mfdataset(f'input/{exp_name}/ocean_salt_201*.nc', chunks={"time": 1},
-                         drop_variables=["Time_bounds", "average_DT"])["salt"].rename(
-    {"xt_ocean":"lon","yt_ocean":"lat","st_ocean":"depth","Time":"time"})
-ds_u = xr.open_mfdataset(f'input/{exp_name}/ocean_u_201*.nc', chunks={"time": 1},
-                         drop_variables=["Time_bounds", "average_DT"])["u"].rename(
-    {"xu_ocean":"lon","yu_ocean":"lat","st_ocean":"depth","Time":"time"})
-ds_u = ds_u.interp(lon=ds_s.lon, lat=ds_s.lat, kwargs={"fill_value": "extrapolate"})
-ds_v = xr.open_mfdataset(f'input/{exp_name}/ocean_v_201*.nc', chunks={"time": 1},
-                         drop_variables=["Time_bounds", "average_DT"])["v"].rename(
-    {"xu_ocean":"lon","yu_ocean":"lat","st_ocean":"depth","Time":"time"})
-ds_v = ds_v.interp(lon=ds_s.lon, lat=ds_s.lat, kwargs={"fill_value": "extrapolate"})
-ds_sw = xr.open_mfdataset(f'input/{exp_name}/rsds_201*.nc', chunks={"time": 1})["rsds"].rename({"xt_ocean":"lon","yt_ocean":"lat"})
+ds_t = xr.open_mfdataset('input/JCOPE2M/best_estimate/T_201[6-9]*.nc')['TT']
+ds_s = xr.open_mfdataset('input/JCOPE2M/best_estimate/S_201[6-9]*.nc')['ST']
+ds_u = xr.open_mfdataset('input/JCOPE2M/best_estimate/UI_201[6-9]*.nc')['UI']
+ds_v = xr.open_mfdataset('input/JCOPE2M/best_estimate/VI_201[6-9]*.nc')['VI']
+ds_jra = xr.open_mfdataset(f'/home/hakaseh/data/JRA55-do-1-6-0/wget/rsds_input4MIPs_atmosphericState_OMIP_MRI-JRA55-do-1-6-0_gr_201[6-9]*.nc')['rsds']
+ds_jra_daily = ds_jra.resample(time='1D').mean()
+ds_interpolated = ds_jra_daily.interp(
+    lat=ds_t['lat'], 
+    lon=ds_t['lon'], 
+    method='linear'  # You can also use 'nearest' if you don't want to blend values
+)
+ds_sw = ds_interpolated.drop_vars(["lat_bnds","lon_bnds","time_bnds"],errors="ignore")
+
+# JCOPE2M provides negative depth values, which we convert to positives
+ds_t = ds_t.assign_coords(depth=ds_t['depth'] * -1.0)
+ds_s = ds_s.assign_coords(depth=ds_s['depth'] * -1.0)
+ds_u = ds_u.assign_coords(depth=ds_u['depth'] * -1.0)
+ds_v = ds_v.assign_coords(depth=ds_v['depth'] * -1.0)
 
 # Optional input
 ds_k = None
@@ -61,6 +64,13 @@ ds_wind = None
 # BGC Inputs
 ds_clim = xr.open_mfdataset(clim_file) if clim_file else None
 ds_restart = xr.open_dataset(restart_file) if restart_file else None
+
+# Rename to required dimensions (lon, lat, depth, time)
+#ds_t = ds_t.rename({"longitude": "lon", "latitude": "lat"})
+
+# Interpolate if necessary
+#ds_sw = ds_sw.resample(time="1D").mean()
+#ds_wind = ds_wind.resample(time="1D").mean()
 
 # --- 3. EXECUTE SIMULATION ---
 # Initialize the simulator with settings
@@ -86,13 +96,13 @@ sim.prepare_forcing(
     ds_s=ds_s, 
     ds_u=ds_u, 
     ds_v=ds_v, 
-    ds_sw=ds_sw,
+    ds_sw=ds_sw, 
     ds_wind=ds_wind,
     ds_ice=ds_ice, 
-    ds_k=ds_k, 
+    ds_k=ds_k,
     ds_clim=ds_clim,
-    ds_restart=ds_restart,
-    glodap_dir=glodap_dir
+    glodap_dir=glodap_dir,
+    ds_restart=ds_restart
 )
 
 # Save the driver script to the output directory for reproducibility

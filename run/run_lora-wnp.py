@@ -16,7 +16,7 @@ import xarray as xr
 from source.simulator import OfflineSimulator
 
 # --- 1. CONFIGURATION ---
-exp_name = "BRAN2020"
+exp_name = "LORA-WNP"
 bgc_model_choice = "FENNEL06"
 dt_in_sec = 1200
 mld_choice = 0.03 
@@ -30,28 +30,18 @@ clim_file = None #f"climatology/{exp_name}/GLODAPv2.2016b.ALL_{exp_name}.nc"
 glodap_dir = "climatology/GLODAPv2.2016b.MappedClimatologies/"
 
 # Domain Slicing
-lat_range   = slice(17, 50)
-lon_range   = slice(117, 150)
-depth_range = slice(None, 1000) #0, 300)
-time_range  = slice("20160101", "20231231")
+lat_range   = slice(17,50)
+lon_range   = slice(117,150)
+depth_range = slice(None, None)
+time_range  = slice('20160101', '20231231')
 
 # --- 2. LOAD PHYSICAL DATA (CMEMS SPECIFIC) ---
 print("Loading raw datasets...")
-ds_t = xr.open_mfdataset(f'input/{exp_name}/ocean_temp_201*.nc', chunks={"time": 1},
-                         drop_variables=["Time_bounds", "average_DT"])["temp"].rename(
-    {"xt_ocean":"lon","yt_ocean":"lat","st_ocean":"depth","Time":"time"})
-ds_s = xr.open_mfdataset(f'input/{exp_name}/ocean_salt_201*.nc', chunks={"time": 1},
-                         drop_variables=["Time_bounds", "average_DT"])["salt"].rename(
-    {"xt_ocean":"lon","yt_ocean":"lat","st_ocean":"depth","Time":"time"})
-ds_u = xr.open_mfdataset(f'input/{exp_name}/ocean_u_201*.nc', chunks={"time": 1},
-                         drop_variables=["Time_bounds", "average_DT"])["u"].rename(
-    {"xu_ocean":"lon","yu_ocean":"lat","st_ocean":"depth","Time":"time"})
-ds_u = ds_u.interp(lon=ds_s.lon, lat=ds_s.lat, kwargs={"fill_value": "extrapolate"})
-ds_v = xr.open_mfdataset(f'input/{exp_name}/ocean_v_201*.nc', chunks={"time": 1},
-                         drop_variables=["Time_bounds", "average_DT"])["v"].rename(
-    {"xu_ocean":"lon","yu_ocean":"lat","st_ocean":"depth","Time":"time"})
-ds_v = ds_v.interp(lon=ds_s.lon, lat=ds_s.lat, kwargs={"fill_value": "extrapolate"})
-ds_sw = xr.open_mfdataset(f'input/{exp_name}/rsds_201*.nc', chunks={"time": 1})["rsds"].rename({"xt_ocean":"lon","yt_ocean":"lat"})
+ds_t = xr.open_mfdataset('input/LORA-WNP/input_LORA_t_npac.20*.nc')['t']
+ds_s = xr.open_mfdataset('input/LORA-WNP/input_LORA_s_npac.20*.nc')['s']
+ds_u = xr.open_mfdataset('input/LORA-WNP/input_LORA_u_npac.20*.nc')['u']
+ds_v = xr.open_mfdataset('input/LORA-WNP/input_LORA_v_npac.20*.nc')['v']
+ds_sw = xr.open_mfdataset('input/LORA-WNP/input_LORA_swr_npac.20*.nc')['swr']
 
 # Optional input
 ds_k = None
@@ -61,6 +51,13 @@ ds_wind = None
 # BGC Inputs
 ds_clim = xr.open_mfdataset(clim_file) if clim_file else None
 ds_restart = xr.open_dataset(restart_file) if restart_file else None
+
+# Rename to required dimensions (lon, lat, depth, time)
+#ds_t = ds_t.rename({"longitude": "lon", "latitude": "lat"})
+
+# Interpolate if necessary
+#ds_sw = ds_sw.resample(time="1D").mean()
+#ds_wind = ds_wind.resample(time="1D").mean()
 
 # --- 3. EXECUTE SIMULATION ---
 # Initialize the simulator with settings
@@ -86,13 +83,13 @@ sim.prepare_forcing(
     ds_s=ds_s, 
     ds_u=ds_u, 
     ds_v=ds_v, 
-    ds_sw=ds_sw,
+    ds_sw=ds_sw, 
     ds_wind=ds_wind,
     ds_ice=ds_ice, 
     ds_k=ds_k, 
-    ds_clim=ds_clim,
-    ds_restart=ds_restart,
-    glodap_dir=glodap_dir
+    ds_clim=ds_clim, 
+    glodap_dir=glodap_dir,
+    ds_restart=ds_restart
 )
 
 # Save the driver script to the output directory for reproducibility

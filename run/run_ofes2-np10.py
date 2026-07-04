@@ -1,4 +1,14 @@
 import os
+# --- 0. HARDWARE LIMITS (MUST BE SET FIRST) ---
+# Define exactly how many CPU cores you want to use
+NUM_CORES = "8"
+# 1. Restrict JAX's internal XLA compiler threadpool
+os.environ["XLA_FLAGS"] = f"--xla_cpu_multi_thread_eigen=true intra_op_parallelism_threads={NUM_CORES}"
+# 2. Restrict NumPy/Xarray background threadpools (highly recommended)
+os.environ["OMP_NUM_THREADS"] = NUM_CORES
+os.environ["OPENBLAS_NUM_THREADS"] = NUM_CORES
+os.environ["MKL_NUM_THREADS"] = NUM_CORES
+
 import sys
 import shutil
 import numpy as np
@@ -14,6 +24,7 @@ mld_choice = 0.03
 sponge_choice = 1
 tau_lateral_choice = 86400.0 * 1
 tau_bottom_choice = 86400.0 * 30
+tau_coast_choice = 86400.0 * 1
 is_global_choice = False
 restart_file = f"input/{exp_name}/restart_{exp_name}_20180101.nc"
 clim_file = None #f"climatology/{exp_name}/GLODAPv2.2016b.ALL_{exp_name}.nc"
@@ -72,7 +83,7 @@ sim = OfflineSimulator(
     dt_phys=dt_in_sec, 
     bgc_params=custom_bgc,
     mld_threshold=mld_choice, sponge_width=sponge_choice,
-    tau_lateral=tau_lateral_choice, tau_bottom=tau_bottom_choice, is_global=is_global_choice
+    tau_lateral=tau_lateral_choice, tau_bottom=tau_bottom_choice, tau_coast=tau_coast_choice, is_global=is_global_choice
 )
 
 # Hand over all raw data and let the simulator subset and prepare it
