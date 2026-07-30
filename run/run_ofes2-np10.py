@@ -20,7 +20,6 @@ from source.bgc_models.npzd_sasai import Params_BGC
 exp_name = "OFES2-NP10"
 bgc_model_choice = "NPZD"
 dt_in_sec = 600.0
-mld_choice = 0.03 
 sponge_choice = 1
 tau_lateral_choice = 86400.0 * 1
 tau_bottom_choice = 86400.0 * 30
@@ -79,18 +78,33 @@ custom_bgc.p_pmo = 0.12
 # --- 3. EXECUTE SIMULATION ---
 # Initialize the simulator with settings
 sim = OfflineSimulator(
-    bgc_model_choice=bgc_model_choice, exp_name=exp_name,
+    bgc_model_choice=bgc_model_choice, 
+    exp_name=exp_name,
     dt_phys=dt_in_sec, 
     bgc_params=custom_bgc,
-    mld_threshold=mld_choice, sponge_width=sponge_choice,
-    tau_lateral=tau_lateral_choice, tau_bottom=tau_bottom_choice, tau_coast=tau_coast_choice, is_global=is_global_choice
+    sponge_width=sponge_choice,
+    tau_lateral=tau_lateral_choice, 
+    tau_bottom=tau_bottom_choice, 
+    tau_coast=tau_coast_choice, 
+    is_global=is_global_choice
 )
 
 # Hand over all raw data and let the simulator subset and prepare it
 sim.prepare_forcing(
-    lat_range=lat_range, lon_range=lon_range, depth_range=depth_range, time_range=time_range,
-    ds_t=ds_t, ds_s=ds_s, ds_u=ds_u, ds_v=ds_v, ds_sw=ds_sw, ds_wind=ds_wind,
-    ds_ice=ds_ice, ds_k=ds_k, ds_clim=ds_clim, ds_restart=ds_restart
+    lat_range=lat_range, 
+    lon_range=lon_range, 
+    depth_range=depth_range, 
+    time_range=time_range,
+    ds_t=ds_t, 
+    ds_s=ds_s, 
+    ds_u=ds_u, 
+    ds_v=ds_v, 
+    ds_sw=ds_sw, 
+    ds_wind=ds_wind,
+    ds_ice=ds_ice, 
+    ds_k=ds_k, 
+    ds_clim=ds_clim, 
+    ds_restart=ds_restart
 )
 
 # Save the driver script to the output directory for reproducibility

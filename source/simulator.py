@@ -15,7 +15,6 @@ class OfflineSimulator:
                  exp_name, 
                  dt_phys, 
                  bgc_params=None,
-                 mld_threshold=0.03,
                  sponge_width=5, 
                  tau_lateral=432000.0, 
                  tau_bottom=5184000.0,
@@ -28,7 +27,6 @@ class OfflineSimulator:
         self.dt_phys = dt_phys
         self.steps_per_day = int(86400 / self.dt_phys)
         self.bgc_params = bgc_params
-        self.mld_threshold = mld_threshold
         self.sponge_width = sponge_width
         self.tau_lateral = tau_lateral
         self.tau_bottom = tau_bottom
@@ -38,7 +36,6 @@ class OfflineSimulator:
         # These will be set during prepare_forcing()
         self.bgc_model = None
         self.ds_clim = None
-        self.mixing_method = None
 
     def prepare_forcing(self, 
                         lat_range, 
@@ -71,12 +68,10 @@ class OfflineSimulator:
 
         # 2. Handle optional/missing data using the subsetted grid size
         if ds_k is None:
-            print("  -> No Kz file provided. Using dummy array and 'convective' mixing.")
-            self.ds_k = xr.zeros_like(self.ds_t) 
-            self.mixing_method = "convective"
+            print("  -> No Kz file provided. Using dummy array and parameterize Kz.")
+            self.ds_k = None
         else:
             self.ds_k = ds_k.sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
-            self.mixing_method = "diffusion"
 
         if ds_wind is None:
             print("  -> No win file provided. Setting all to ZERO (no gas exchange).")
@@ -177,11 +172,11 @@ class OfflineSimulator:
             print(f"  Day {day+1} / {nt}")
             
             # 1. Load Forcing (Directly from internally stored, subsetted datasets)
+            t = np.nan_to_num(self.ds_t.isel(time=day).values)
+            s = np.nan_to_num(self.ds_s.isel(time=day).values)            
             u = np.nan_to_num(self.ds_u.isel(time=day).values)
             v = np.nan_to_num(self.ds_v.isel(time=day).values)
-            k = np.nan_to_num(self.ds_k.isel(time=day).values)
-            t = np.nan_to_num(self.ds_t.isel(time=day).values)
-            s = np.nan_to_num(self.ds_s.isel(time=day).values)
+
             # set negative salinity to zero (e.g. JCOPE2M)
             s = s = np.maximum(s, 0.0)
             sw = np.nan_to_num(self.ds_sw.isel(time=day).values)
@@ -196,13 +191,18 @@ class OfflineSimulator:
             # Re-mask the calculated density back to 0.0 over land
             rho_3d = np.where(self.water_mask, rho_3d, 0.0)
             
-            self.mld_2d = physics.calculate_mld(rho_3d, self.dz_static, self.mld_threshold)
+            self.mld_2d = physics.calculate_mld(rho_3d, self.dz_static)
+            
+            if self.ds_k is None:
+                k = physics.calculate_full_kz_jax(self.mld_2d, rho_3d, self.dz_3d)
+            else:
+                k = np.nan_to_num(self.ds_k.isel(time=day).values)
             
             # Calc W
             u[~self.water_mask] = 0.0
             v[~self.water_mask] = 0.0
             w = physics.calculate_w_rigid_lid(u, v, self.dz_static, self.dx, self.dy)  
-
+            
             # Calculate O2 Saturation ONCE per day
             if "oxygen" in self.bgc_model.tracers:
                 salt_surf = s[0, :, :]
@@ -211,6 +211,7 @@ class OfflineSimulator:
                 o2_sat_umol_kg = gsw.O2sol_SP_pt(salt_surf, temp_surf)
                 o2_sat_mmol_m3 = o2_sat_umol_kg * (rho_surf / 1000.0)
             
+
             # --- SUB-STEPPED LOOP (Physics + Biology + Restoring) ---
             for step in range(self.steps_per_day):
                 
@@ -219,8 +220,7 @@ class OfflineSimulator:
                     # The @jax.jit decorator automatically compiles the math 
                     # on the very first time step, making the remaining steps incredibly fast.
                     tr_adv = physics.advection_neumann_jax(tr_data, u, v, w, self.dz_static, self.dt_phys, self.dx, self.dy, is_global=self.is_global)
-                    k_kpp = physics.calculate_full_kz_jax(self.mld_2d, rho_3d, self.dz_3d)
-                    tr_mix = physics.diffusion_robust_jax(tr_adv, k_kpp, self.dz_static, self.dt_phys)
+                    tr_mix = physics.diffusion_robust_jax(tr_adv, k, self.dz_static, self.dt_phys)
                         
                     # CLAMP #1: Immediately after physics to fix advection overshoots (JAX compliant)
                     self.bgc_model.tracers[name] = jnp.maximum(tr_mix, 0.0)
@@ -256,21 +256,51 @@ class OfflineSimulator:
                     )
                 
             # Save Output              
-            self.save_day(day, self.ds_t.isel(time=day).time.values, par_3d)
+            self.save_day(day, self.ds_t.isel(time=day).time.values, par_3d, rho_3d, k, t, s, u, v)
 
-    def save_day(self, day, current_time, par_3d):
+    def save_day(self, day, current_time, par_3d, rho_3d, k, t, s, u, v):
+        
         data_map = {name: arr for name, arr in self.bgc_model.tracers.items()}
         data_map['PAR'] = par_3d
         ds_out = xr.Dataset(coords=self.ds_template.coords)
+        
+        # This loop handles tracers and PAR
         for var, arr in data_map.items():
-            # FIX: Force JAX array (arr) back into a standard numpy array before feeding to xarray/where
             arr_np = np.asarray(arr)
             ds_out[var] = (self.ds_template.dims, np.where(self.water_mask, arr_np, np.nan))
-            ds_out[var].attrs = {'units': 'mmol/m3'}
-            
+            if var == 'PAR':
+                ds_out[var].attrs = {'units': 'W/m2', 'long_name': 'Photosynthetically Active Radiation'}
+            elif 'chl' in var:
+                ds_out[var].attrs = {'units': 'mg/m3'}                  
+            else:
+                ds_out[var].attrs = {'units': 'mmol/m3'}  
+                
         dims_2d = [dim for dim in self.ds_template.dims if dim != 'depth']
         mask_2d = self.water_mask[0, :, :] 
         
+        rho_np = np.asarray(rho_3d)
+        ds_out['sigma0'] = (self.ds_template.dims, np.where(self.water_mask, rho_np, np.nan))
+        ds_out['sigma0'].attrs = {'units': 'kg/m3', 'long_name': 'Potential Density Anomaly (Sigma-0)'}
+
+        # --- Save Diffusivity ---
+        kz_np = np.asarray(k)
+        ds_out['kz'] = (self.ds_template.dims, np.where(self.water_mask, kz_np, np.nan))
+        ds_out['kz'].attrs = {'units': 'm2/s', 'long_name': 'Vertical Eddy Diffusivity'}
+
+        # --- Save Diffusivity ---
+        t_np = np.asarray(t)
+        ds_out['t'] = (self.ds_template.dims, np.where(self.water_mask, t_np, np.nan))
+        ds_out['t'].attrs = {'units': 'celcius', 'long_name': 'Temperature'}
+        s_np = np.asarray(s)
+        ds_out['s'] = (self.ds_template.dims, np.where(self.water_mask, s_np, np.nan))
+        ds_out['s'].attrs = {'units': 'psu', 'long_name': 'Salinity'}
+        u_np = np.asarray(u)
+        ds_out['u'] = (self.ds_template.dims, np.where(self.water_mask, u_np, np.nan))
+        ds_out['u'].attrs = {'units': 'm/s', 'long_name': 'Zonal velocity'}
+        v_np = np.asarray(v)
+        ds_out['v'] = (self.ds_template.dims, np.where(self.water_mask, v_np, np.nan))
+        ds_out['v'].attrs = {'units': 'm/s', 'long_name': 'Meridional velocity'}
+
         # Pull mld back to numpy
         mld_np = np.asarray(self.mld_2d)
         ds_out['MLD'] = (dims_2d, np.where(mask_2d, mld_np, np.nan))

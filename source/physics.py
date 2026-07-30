@@ -396,101 +396,8 @@ def create_restoring_weights(water_mask, sponge_width, dt, tau_lateral=86400.0, 
     
     return nudge_coeff
 
-#Deprecated. To be deleted!
-@njit(parallel=True, fastmath=True)
-def mixing_convective(tracer, rho_3d, dz_3d, delta_rho_mld):
-    """
-    Vertical mixing based on density gradient (Convective Adjustment).
-    Uses a 10m reference depth to bypass surface freshwater/heating lenses.
-    """
-    nz, ny, nx = tracer.shape
-    tracer_out = np.empty_like(tracer)
-    
-    for j in prange(ny):
-        for i in range(nx):
-            # 1. LAND CHECK
-            if dz_3d[0, j, i] < 1e-6 or np.isnan(tracer[0, j, i]):
-                tracer_out[:, j, i] = np.nan
-                continue
-                
-            # Copy column data to local 1D arrays
-            col_tr = np.empty(nz)
-            col_rho = np.empty(nz)
-            for k in range(nz):
-                col_tr[k] = tracer[k, j, i]
-                col_rho[k] = rho_3d[k, j, i]
-                
-            # --- 1. MLD MIXING (10m Reference) ---
-            # Find the reference layer closest to 10m
-            depth_accum = 0.0
-            k_ref = 0
-            for k in range(nz):
-                depth_accum += dz_3d[k, j, i]
-                if depth_accum >= 10.0:
-                    k_ref = k
-                    break
-                    
-            rho_ref = col_rho[k_ref]
-            
-            # Find the bottom of the mixed layer
-            k_mld = 0
-            for k in range(nz):
-                if k >= k_ref:
-                    if (col_rho[k] - rho_ref) > delta_rho_mld:
-                        k_mld = k - 1  # The layer just before the threshold was crossed
-                        break
-                    else:
-                        k_mld = k  # Keep going down if still well-mixed
-                        
-            # Homogenize everything from the surface down to k_mld
-            if k_mld > 0:
-                sum_mass = 0.0
-                sum_rho_mass = 0.0
-                sum_vol = 0.0
-                for k in range(k_mld + 1):
-                    vol = dz_3d[k, j, i]
-                    sum_mass += col_tr[k] * vol
-                    sum_rho_mass += col_rho[k] * vol
-                    sum_vol += vol
-                
-                avg_conc = sum_mass / sum_vol
-                avg_rho = sum_rho_mass / sum_vol
-                for k in range(k_mld + 1):
-                    col_tr[k] = avg_conc
-                    col_rho[k] = avg_rho
-                    
-            # --- 2. DEEP CONVECTIVE ADJUSTMENT (Instability) ---
-            unstable = True
-            passes = 0
-            while unstable and passes < nz:
-                unstable = False
-                passes += 1
-                for k in range(k_mld, nz - 1):
-                    # Using potential density here is perfect!
-                    if col_rho[k] > col_rho[k+1]:
-                        vol1 = dz_3d[k, j, i]
-                        vol2 = dz_3d[k+1, j, i]
-                        total_vol = vol1 + vol2
-                        
-                        avg_tr = (col_tr[k]*vol1 + col_tr[k+1]*vol2) / total_vol
-                        col_tr[k] = avg_tr
-                        col_tr[k+1] = avg_tr
-                        
-                        avg_rho = (col_rho[k]*vol1 + col_rho[k+1]*vol2) / total_vol
-                        col_rho[k] = avg_rho
-                        col_rho[k+1] = avg_rho
-                        
-                        unstable = True
-                        
-            # Save stabilized column
-            for k in range(nz):
-                tracer_out[k, j, i] = col_tr[k]
-                
-    return tracer_out
-
-
 @jax.jit
-def calculate_mld(rho_3d, dz_3d, delta_rho_mld):
+def calculate_mld(rho_3d, dz_3d):
     nz, ny, nx = rho_3d.shape
     
     # --- 1. Calculate Depths ---
@@ -513,8 +420,8 @@ def calculate_mld(rho_3d, dz_3d, delta_rho_mld):
     k_indices = jnp.arange(nz)[:, None, None]
     is_valid_search_depth = k_indices >= k_ref_2d[None, :, :]
     
-    # Find all cells that exceed the density threshold
-    is_dense = (rho_3d - rho_ref_2d[None, :, :]) > delta_rho_mld
+    # Find all cells that exceed the density threshold (hard coded to 0.03 because it is the standard)
+    is_dense = (rho_3d - rho_ref_2d[None, :, :]) > 0.03 
     
     # Combine the conditions: Must be below 10m AND exceed threshold
     pycnocline_mask = is_dense & is_valid_search_depth

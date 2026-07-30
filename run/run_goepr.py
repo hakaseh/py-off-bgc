@@ -1,6 +1,3 @@
-import taichi as ti
-ti.init(arch=ti.cpu, default_fp=ti.f32)
-import os
 import sys
 import shutil
 import numpy as np
@@ -15,9 +12,11 @@ mld_choice = 0.03
 sponge_choice = 1
 tau_lateral_choice = 86400.0 * 1
 tau_bottom_choice = 86400.0 * 30
+tau_coast_choice = 86400.0 * 1
 is_global_choice = False
 restart_file = None #f"output/{bgc_model_choice}_{exp_name}/restart.nc"
-clim_file = f"climatology/{exp_name}/GLODAPv2.2016b.ALL_{exp_name}.nc"
+clim_file = None # f"climatology/{exp_name}/GLODAPv2.2016b.ALL_{exp_name}.nc"
+glodap_dir = "climatology/GLODAPv2.2016b.MappedClimatologies/"
 
 # Domain Slicing
 lat_range   = slice(None, None) #17, 50)
@@ -41,7 +40,7 @@ ds_k = None
 ds_ice = xr.open_mfdataset('input/GOEPR_ERA5_Hokkaido/cmems_mod_glo_phy-mnstd_my_0.25deg_P1D-m_1773366055400.nc*')['siconc_mean']
 
 # BGC Inputs
-ds_clim = xr.open_mfdataset(clim_file) if clim_file else None
+ds_clim = xr.open_dataset(clim_file) if clim_file else None
 ds_restart = xr.open_dataset(restart_file) if restart_file else None
 
 # Rename to required dimensions
@@ -60,16 +59,33 @@ ds_wind = ds_wind.resample(time="1D").mean()
 # --- 3. EXECUTE SIMULATION ---
 # Initialize the simulator with settings
 sim = OfflineSimulator(
-    bgc_model_choice=bgc_model_choice, exp_name=exp_name,
-    dt_phys=dt_in_sec, mld_threshold=mld_choice, sponge_width=sponge_choice,
-    tau_lateral=tau_lateral_choice, tau_bottom=tau_bottom_choice, is_global=is_global_choice
+    bgc_model_choice=bgc_model_choice, 
+    exp_name=exp_name,
+    dt_phys=dt_in_sec, 
+    sponge_width=sponge_choice,
+    tau_lateral=tau_lateral_choice, 
+    tau_bottom=tau_bottom_choice, 
+    tau_coast=tau_coast_choice, 
+    is_global=is_global_choice
 )
 
 # Hand over all raw data and let the simulator subset and prepare it
 sim.prepare_forcing(
-    lat_range=lat_range, lon_range=lon_range, depth_range=depth_range, time_range=time_range,
-    ds_t=ds_t, ds_s=ds_s, ds_u=ds_u, ds_v=ds_v, ds_sw=ds_sw, ds_wind=ds_wind,
-    ds_ice=ds_ice, ds_k=ds_k, ds_clim=ds_clim, ds_restart=ds_restart
+    lat_range=lat_range, 
+    lon_range=lon_range, 
+    depth_range=depth_range, 
+    time_range=time_range,
+    ds_t=ds_t, 
+    ds_s=ds_s, 
+    ds_u=ds_u, 
+    ds_v=ds_v, 
+    ds_sw=ds_sw, 
+    ds_wind=ds_wind,
+    ds_ice=ds_ice, 
+    ds_k=ds_k, 
+    ds_clim=ds_clim, 
+    glodap_dir=glodap_dir,
+    ds_restart=ds_restart
 )
 
 # Save the driver script to the output directory for reproducibility

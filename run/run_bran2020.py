@@ -15,88 +15,76 @@ import numpy as np
 import xarray as xr
 from source.simulator import OfflineSimulator
 
-# --- 1. CONFIGURATION ---
-exp_name = "BRAN2020"
-bgc_model_choice = "FENNEL06"
-dt_in_sec = 1200
-mld_choice = 0.03 
-sponge_choice = 1
-tau_lateral_choice = 86400.0 * 1
-tau_bottom_choice = 86400.0 * 30
-tau_coast_choice = 86400.0 * 1
-is_global_choice = False
-restart_file = None #f"output/{bgc_model_choice}_{exp_name}/restart.nc"
-clim_file = None #f"climatology/{exp_name}/GLODAPv2.2016b.ALL_{exp_name}.nc"
-glodap_dir = "climatology/GLODAPv2.2016b.MappedClimatologies/"
-
-# Domain Slicing
-lat_range   = slice(17, 50)
-lon_range   = slice(117, 150)
-depth_range = slice(None, 1000) #0, 300)
-time_range  = slice("20160101", "20231231")
-
-# --- 2. LOAD PHYSICAL DATA (CMEMS SPECIFIC) ---
-print("Loading raw datasets...")
-ds_t = xr.open_mfdataset(f'input/{exp_name}/ocean_temp_201*.nc', chunks={"time": 1},
-                         drop_variables=["Time_bounds", "average_DT"])["temp"].rename(
-    {"xt_ocean":"lon","yt_ocean":"lat","st_ocean":"depth","Time":"time"})
-ds_s = xr.open_mfdataset(f'input/{exp_name}/ocean_salt_201*.nc', chunks={"time": 1},
-                         drop_variables=["Time_bounds", "average_DT"])["salt"].rename(
-    {"xt_ocean":"lon","yt_ocean":"lat","st_ocean":"depth","Time":"time"})
-ds_u = xr.open_mfdataset(f'input/{exp_name}/ocean_u_201*.nc', chunks={"time": 1},
-                         drop_variables=["Time_bounds", "average_DT"])["u"].rename(
-    {"xu_ocean":"lon","yu_ocean":"lat","st_ocean":"depth","Time":"time"})
-ds_u = ds_u.interp(lon=ds_s.lon, lat=ds_s.lat, kwargs={"fill_value": "extrapolate"})
-ds_v = xr.open_mfdataset(f'input/{exp_name}/ocean_v_201*.nc', chunks={"time": 1},
-                         drop_variables=["Time_bounds", "average_DT"])["v"].rename(
-    {"xu_ocean":"lon","yu_ocean":"lat","st_ocean":"depth","Time":"time"})
-ds_v = ds_v.interp(lon=ds_s.lon, lat=ds_s.lat, kwargs={"fill_value": "extrapolate"})
-ds_sw = xr.open_mfdataset(f'input/{exp_name}/rsds_201*.nc', chunks={"time": 1})["rsds"].rename({"xt_ocean":"lon","yt_ocean":"lat"})
-
-# Optional input
-ds_k = None
-ds_ice = None
-ds_wind = None
-
-# BGC Inputs
-ds_clim = xr.open_mfdataset(clim_file) if clim_file else None
-ds_restart = xr.open_dataset(restart_file) if restart_file else None
-
-# --- 3. EXECUTE SIMULATION ---
-# Initialize the simulator with settings
-sim = OfflineSimulator(
-    bgc_model_choice=bgc_model_choice, 
-    exp_name=exp_name,
-    dt_phys=dt_in_sec, 
-    mld_threshold=mld_choice, 
-    sponge_width=sponge_choice,
-    tau_lateral=tau_lateral_choice, 
-    tau_bottom=tau_bottom_choice, 
-    tau_coast=tau_coast_choice, 
-    is_global=is_global_choice
-)
-
-# Hand over all raw data and let the simulator subset and prepare it
-sim.prepare_forcing(
-    lat_range=lat_range, 
-    lon_range=lon_range, 
-    depth_range=depth_range, 
-    time_range=time_range,
-    ds_t=ds_t, 
-    ds_s=ds_s, 
-    ds_u=ds_u, 
-    ds_v=ds_v, 
-    ds_sw=ds_sw,
-    ds_wind=ds_wind,
-    ds_ice=ds_ice, 
-    ds_k=ds_k, 
-    ds_clim=ds_clim,
-    ds_restart=ds_restart,
-    glodap_dir=glodap_dir
-)
-
-# Save the driver script to the output directory for reproducibility
-shutil.copy(sys.argv[0], os.path.join(sim.out_dir, os.path.basename(sys.argv[0])))
-
-# Start the simulation loop!
-sim.run()
+for year in range(2017,2024):
+    # --- 1. CONFIGURATION ---
+    exp_name = "BRAN2020"
+    bgc_model_choice = "NEMURO"
+    dt_in_sec = 1200
+    sponge_choice = 1
+    tau_lateral_choice = 86400.0 * 1
+    tau_bottom_choice = 86400.0 * 30
+    tau_coast_choice = 86400.0 * 1
+    is_global_choice = False
+    restart_file = f"output/{exp_name}/{bgc_model_choice}/output_{exp_name}_{bgc_model_choice}_{year-1}1231.nc"
+    clim_file = None #f"climatology/{exp_name}/GLODAPv2.2016b.ALL_{exp_name}.nc"
+    glodap_dir = "climatology/GLODAPv2.2016b.MappedClimatologies/"
+    
+    # Domain Slicing
+    lat_range   = slice(None, None)
+    lon_range   = slice(None, None)
+    depth_range = slice(None, None)
+    time_range  = slice(None, None)
+    
+    # --- 2. LOAD PHYSICAL DATA ---
+    ds_t = xr.open_dataset(f'input/{exp_name}/nwp/input_temp_{year}_BRAN2020_2016-2023_nwp.nc')["temp"]
+    ds_s = xr.open_dataset(f'input/{exp_name}/nwp/input_salt_{year}_BRAN2020_2016-2023_nwp.nc')["salt"]
+    ds_u = xr.open_dataset(f'input/{exp_name}/nwp/input_u_{year}_BRAN2020_2016-2023_nwp.nc')["u"]
+    ds_v = xr.open_dataset(f'input/{exp_name}/nwp/input_v_{year}_BRAN2020_2016-2023_nwp.nc')["v"]
+    ds_sw = xr.open_dataset(f'input/{exp_name}/nwp/input_rsds_{year}_BRAN2020_2016-2023_nwp.nc')["rsds"]
+    
+    # Optional input
+    ds_k = None
+    ds_ice = None
+    ds_wind = None
+    
+    # BGC Inputs
+    ds_clim = xr.open_mfdataset(clim_file) if clim_file else None
+    ds_restart = xr.open_dataset(restart_file) if restart_file else None
+    
+    # --- 3. EXECUTE SIMULATION ---
+    # Initialize the simulator with settings
+    sim = OfflineSimulator(
+        bgc_model_choice=bgc_model_choice, 
+        exp_name=exp_name,
+        dt_phys=dt_in_sec, 
+        sponge_width=sponge_choice,
+        tau_lateral=tau_lateral_choice, 
+        tau_bottom=tau_bottom_choice, 
+        tau_coast=tau_coast_choice, 
+        is_global=is_global_choice
+    )
+    
+    # Hand over all raw data and let the simulator subset and prepare it
+    sim.prepare_forcing(
+        lat_range=lat_range, 
+        lon_range=lon_range, 
+        depth_range=depth_range, 
+        time_range=time_range,
+        ds_t=ds_t, 
+        ds_s=ds_s, 
+        ds_u=ds_u, 
+        ds_v=ds_v, 
+        ds_sw=ds_sw,
+        ds_wind=ds_wind,
+        ds_ice=ds_ice, 
+        ds_k=ds_k, 
+        ds_clim=ds_clim,
+        ds_restart=ds_restart,
+        glodap_dir=glodap_dir
+    )
+    
+    # Save the driver script to the output directory for reproducibility
+    shutil.copy(sys.argv[0], os.path.join(sim.out_dir, os.path.basename(sys.argv[0])))
+    
+    # Start the simulation loop!
+    sim.run()

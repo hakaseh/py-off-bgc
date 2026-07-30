@@ -24,6 +24,12 @@ source env/bin/activate
 pip install -r requirements.txt
 ```
 
+* Enable password-less access to Copernicus marine datasets:
+```
+copernicusmarine login
+```
+(When prompted, enter the username and password)
+
 ### An example test case: GOEPR_ERA5_Hokkaido
 
 * Download the forcing dataset from [Zenodo](https://zenodo.org/records/19703262).
