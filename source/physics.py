@@ -3,6 +3,60 @@ from numba import njit, prange
 import math
 import jax
 import jax.numpy as jnp
+import xarray as xr
+
+def generate_static_grid(ds_template):
+    """Calculates static grid metrics from the coordinate template."""
+    R_EARTH = 6371000.0
+    
+    # 1. Delta Longitude and Latitude
+    dlon_vals = np.abs(np.diff(ds_template['lon'].values))
+    dlon_vals = np.append(dlon_vals, dlon_vals[-1])
+    
+    dlat_vals = np.abs(np.diff(ds_template['lat'].values))
+    dlat_vals = np.append(dlat_vals, dlat_vals[-1])
+    
+    dlon = xr.DataArray(dlon_vals, dims=['lon'], coords={'lon': ds_template['lon']})
+    dlat = xr.DataArray(dlat_vals, dims=['lat'], coords={'lat': ds_template['lat']})
+    
+    # 2. Area
+    dlon_rad = np.radians(dlon)
+    dlat_rad = np.radians(dlat)
+    lat_rad = np.radians(ds_template['lat'])
+    area = (R_EARTH**2) * dlat_rad * dlon_rad * np.cos(lat_rad)
+    
+    # 3. Delta Depth (dz)
+    if 'depth' in ds_template.coords:
+        ddep_vals = np.abs(np.diff(ds_template['depth'].values))
+        ddep_vals = np.append(ddep_vals, ddep_vals[-1])
+        dz = xr.DataArray(ddep_vals, dims=['depth'], coords={'depth': ds_template['depth']})
+        
+        # 4. Volume (dz broadcasts automatically over the 2D area)
+        volume = area * dz
+    else:
+        dz = None
+        volume = None
+
+    # 5. Pack everything into a clean Dataset
+    ds_grid = xr.Dataset(
+        data_vars={
+            'area': (['lat', 'lon'], area.values),
+        },
+        coords=ds_template.coords
+    )
+    
+    if volume is not None:
+        ds_grid['dz'] = (['depth'], dz.values)
+        # Transpose to ensure standard (depth, lat, lon) ordering
+        ds_grid['volume'] = (['depth', 'lat', 'lon'], volume.transpose('depth', 'lat', 'lon').values)
+
+    # Add standard attributes
+    ds_grid['area'].attrs = {'units': 'm2', 'long_name': 'Grid Cell Area'}
+    if volume is not None:
+        ds_grid['dz'].attrs = {'units': 'm', 'long_name': 'Vertical Grid Spacing'}
+        ds_grid['volume'].attrs = {'units': 'm3', 'long_name': 'Grid Cell Volume'}
+        
+    return ds_grid
 
 @jax.jit(static_argnums=(8,))
 def advection_neumann_jax(tracer, u, v, w, dz, dt, dx, dy, is_global=False):

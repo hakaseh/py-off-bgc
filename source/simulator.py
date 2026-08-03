@@ -74,7 +74,7 @@ class OfflineSimulator:
             self.ds_k = ds_k.sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
 
         if ds_wind is None:
-            print("  -> No win file provided. Setting all to ZERO (no gas exchange).")
+            print("  -> No wind file provided. Setting all to ZERO (no gas exchange).")
             self.ds_wind = xr.zeros_like(self.ds_sw)
         else:
             self.ds_wind = ds_wind.sel(time=time_range, lat=lat_range, lon=lon_range)
@@ -149,6 +149,18 @@ class OfflineSimulator:
         self.ds_template = self.ds_t.isel(time=0).drop_vars('time')
         self.out_dir = f"output/{self.exp_name}/{self.bgc_model_choice}"
         os.makedirs(self.out_dir, exist_ok=True)
+
+        # --- NEW: Generate and save static grid metrics ---
+        static_grid_file = f"{self.out_dir}/static_grid_{self.exp_name}_{self.bgc_model_choice}.nc"
+        
+        if not os.path.exists(static_grid_file):
+            print("Generating Static Grid Metrics File...")
+            ds_grid = physics.generate_static_grid(self.ds_template)
+            
+            # Save it once. 
+            ds_grid.to_netcdf(static_grid_file)
+            print(f"  -> Saved {static_grid_file}")
+
         
     def setup_restoring(self):
         """Dynamically load restoring targets from the prepared climatology dataset."""
