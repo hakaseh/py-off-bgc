@@ -117,8 +117,10 @@ def nemuro_kernel_jax(
     d_Opal = MorPLsi + EgeZLsi + EgeZPsi - DecP2Si
 
     # Chlorophyll-a
-    d_schl = p_thetas * GppPSn**2 / (PSn + 1e-12) / (p_alphas * par + 1e-12) - (ResPSn + MorPSn + ExcPSn + GraPS2ZSn + GraPS2ZLn) / (PSn + 1e-12) * schl
-    d_lchl = p_thetal * GppPLn**2 / (PLn + 1e-12) / (p_alphal * par + 1e-12) - (ResPLn + MorPLn + ExcPLn + GraPL2ZLn + GraPL2ZPn) / (PLn + 1e-12) * lchl                    
+    # C:N mass conversion factor: (106 mol C / 16 mol N) * 12.01 mg C / mmol C ~= 79.57
+    cn_mass = 106/16*12.01
+    d_schl = p_thetas * GppPSn**2 / (PSn + 1e-12) / (p_alphas * par + 1e-12) * cn_mass - (ResPSn + MorPSn + ExcPSn + GraPS2ZSn + GraPS2ZLn) / (PSn + 1e-12) * schl     
+    d_lchl = p_thetal * GppPLn**2 / (PLn + 1e-12) / (p_alphal * par + 1e-12) * cn_mass - (ResPLn + MorPLn + ExcPLn + GraPL2ZLn + GraPL2ZPn) / (PLn + 1e-12) * lchl      
     
     d_oxygen = - 172.0 / 16.0 * (d_nitrate + d_ammonium + Nit)
 
