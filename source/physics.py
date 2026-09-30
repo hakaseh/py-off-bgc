@@ -1,6 +1,7 @@
 import numpy as np
 from numba import njit, prange
 import math
+import functools
 import jax
 import jax.numpy as jnp
 import xarray as xr
@@ -58,7 +59,7 @@ def generate_static_grid(ds_template):
         
     return ds_grid
 
-@jax.jit(static_argnums=(8,))
+@functools.partial(jax.jit, static_argnums=(8,))
 def advection_neumann_jax(tracer, u, v, w, dz, dt, dx, dy, is_global=False):
     # Expand 2D metrics to 3D for matrix broadcasting
     dx_c = dx[None, :, :]

@@ -1,3 +1,20 @@
+import os
+os.environ["JAX_PLATFORMS"] = "cpu"
+# Set this to the actual number of cores you want to use
+NUM_CORES = "4" 
+
+# 1. Force XLA's Eigen compiler to use all cores on Linux
+os.environ["XLA_FLAGS"] = (
+    f"--xla_cpu_multi_thread_eigen=true "
+    f"intra_op_parallelism_threads={NUM_CORES} "
+    f"inter_op_parallelism_threads={NUM_CORES}"
+)
+
+# 2. Force the underlying C++ math libraries to match
+os.environ["OMP_NUM_THREADS"] = NUM_CORES
+os.environ["OPENBLAS_NUM_THREADS"] = NUM_CORES
+os.environ["MKL_NUM_THREADS"] = NUM_CORES
+
 import sys
 import shutil
 import numpy as np
