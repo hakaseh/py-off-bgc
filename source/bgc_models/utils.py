@@ -1,5 +1,5 @@
-import jax
-import jax.numpy as jnp
+import taichi as ti
+import numpy as np
 
 # Mapping: Model Standard Name -> GLODAP File Name
 GLODAP_MAP = {
@@ -11,90 +11,86 @@ GLODAP_MAP = {
     'alk': 'TAlk'
 }
 
-
-@jax.jit
-def calculate_par(sw_surface, psum, dz):
+@ti.kernel
+def calculate_par_ti(
+    sw_surface: ti.types.ndarray(), 
+    psum: ti.types.ndarray(), 
+    dz: ti.types.ndarray(), 
+    par: ti.types.ndarray()
+):
     """
     Beer-Lambert Law for light attenuation.
-    Shared by all models.
-    Fully vectorized using cumulative optical depth.
+    Calculates optical depth column-by-column, perfectly parallelized across the 2D surface.
     """
-    k_water = 0.04
-    k_phyto = 0.03
+    nz, ny, nx = psum.shape
     
-    # 1. Surface light (approx 43% of SW radiation)
-    # Expand 2D surface to 3D for matrix broadcasting: shape (1, ny, nx)
-    light_surface = (sw_surface * 0.43)[None, :, :]
-    
-    # 2. Calculate attenuation coefficient for every cell simultaneously
-    k_total = k_water + k_phyto * psum
-    
-    # 3. Calculate "Optical Depth" (tau) of each layer
-    tau = k_total * dz
-    
-    # 4. Cumulative optical depth down the column
-    # jnp.cumsum instantly sums down the z-axis (axis=0)
-    cum_tau_bottom = jnp.cumsum(tau, axis=0)
-    
-    # The optical depth at the TOP of the layer is the bottom minus this layer's tau
-    cum_tau_top = cum_tau_bottom - tau
-    
-    # 5. Calculate PAR at the center of each layer
-    # Light at top of layer * exponential decay through half the layer
-    light_at_top = light_surface * jnp.exp(-cum_tau_top)
-    par = light_at_top * jnp.exp(-0.5 * tau)
-    
-    # 6. Mask out land cells
-    return jnp.where(dz > 1e-6, par, 0.0)
+    for j, i in ti.ndrange(ny, nx):
+        if dz[0, j, i] > 1e-6:
+            # 1. Surface light (approx 43% of SW radiation)
+            light = sw_surface[j, i] * 0.43
+            
+            # 2. Iterate down the water column
+            for k in range(nz):
+                if dz[k, j, i] < 1e-6:
+                    break  # Hit the seafloor, stop calculating light
+                    
+                # k_total = k_water + (k_phyto * phytoplankton_sum)
+                k_total = 0.04 + 0.03 * psum[k, j, i]
+                tau = k_total * dz[k, j, i]
+                
+                # PAR at the center of the current cell
+                par[k, j, i] = light * ti.math.exp(-0.5 * tau)
+                
+                # Attenuate the light for the TOP of the next cell down
+                light = light * ti.math.exp(-tau)
 
 
-@jax.jit
-def apply_sinking(tracer, dz, dt, w_sink):
+@ti.kernel
+def apply_sinking_ti(
+    tracer: ti.types.ndarray(), 
+    dz: ti.types.ndarray(), 
+    dt: ti.f32, 
+    w_sink: ti.f32, 
+    min_dz: ti.f32
+):
     """
-    Generic Vertical Sinking (Upwind Scheme) with Adaptive Sub-stepping.
-    Equation: dC/dt = -d(w*C)/dz
-    Vectorized and compiled using jax.lax.fori_loop.
+    1D Upwind Vertical Sinking with Adaptive Sub-stepping.
+    Runs 100% in-place memory by passing flux down the column iteratively.
     """
     # Convert speed: m/day -> m/s
     w_s = w_sink / 86400.0
     
-    # 1. Find minimum dz for CFL safety limit
-    # Force land cells (dz <= 1e-6) to a huge number so they don't trigger the min()
-    dz_safe_min = jnp.where(dz > 1e-6, dz, 1e6)
-    min_dz = jnp.min(dz_safe_min)
-    
-    # 2. Calculate safe sub-step (Max distance per step = 90% of thinnest cell)
-    # We use a tiny denominator clamp to prevent division by zero if w_s is exactly 0.0
-    dt_safe = (min_dz / jnp.maximum(w_s, 1e-12)) * 0.9 
-    
-    # Calculate integer number of steps (minimum of 1)
-    n_steps = jnp.maximum(1, jnp.ceil(dt / dt_safe).astype(jnp.int32))
-    dt_sub = dt / n_steps
-    
-    # Safe divisor for the concentration update
-    dz_safe_div = jnp.where(dz > 1e-6, dz, 1.0)
-    
-    # 3. Define the single sub-step logic for JAX's loop
-    def step_fn(i, current_tracer):
-        # Pad surface with zero (no atmospheric influx of particulate matter)
-        zero_surface = jnp.zeros_like(current_tracer[0:1, :, :])
-        tracer_padded = jnp.concatenate([zero_surface, current_tracer], axis=0)
+    if w_s > 0.0:
+        # Calculate safe sub-step (Max distance per step = 90% of thinnest cell)
+        dt_safe = (min_dz / ti.max(w_s, 1e-12)) * 0.9 
+        n_steps = ti.max(1, ti.cast(ti.ceil(dt / dt_safe), ti.i32))
+        dt_sub = dt / float(n_steps)
         
-        # Instant flux calculations for all vertical interfaces
-        flux_in_top = w_s * tracer_padded[:-1, :, :]
-        flux_out_bottom = w_s * tracer_padded[1:, :, :]
+        nz, ny, nx = tracer.shape
         
-        # Apply trend
-        trend = (flux_in_top - flux_out_bottom) / dz_safe_div
-        updated_tracer = current_tracer + (trend * dt_sub)
-        
-        # Clamp to prevent negative concentrations
-        return jnp.maximum(0.0, updated_tracer)
-        
-    # 4. Execute the XLA-compiled dynamic loop
-    # lax.fori_loop is JAX's ultra-fast equivalent of `for i in range(n_steps):`
-    tracer_final = jax.lax.fori_loop(0, n_steps, step_fn, tracer)
-    
-    # 5. Mask land and apply a bypass if sinking speed is 0.0
-    tracer_masked = jnp.where(dz > 1e-6, tracer_final, tracer)
-    return jnp.where(w_s > 0.0, tracer_masked, tracer)
+        # Parallelize across the 2D surface
+        for j, i in ti.ndrange(ny, nx):
+            if dz[0, j, i] > 1e-6:
+                
+                # Execute the CFL-safe sub-steps
+                for step in range(n_steps):
+                    
+                    # Surface flux is always 0 (no atmospheric influx of organic matter)
+                    flux_in = 0.0
+                    
+                    # Iterate top-to-bottom
+                    for k in range(nz):
+                        if dz[k, j, i] < 1e-6:
+                            break
+                        
+                        # Calculate flux leaving the bottom of this cell
+                        flux_out = w_s * tracer[k, j, i]
+                        
+                        # Change in concentration
+                        trend = (flux_in - flux_out) / dz[k, j, i]
+                        
+                        # Update the cell in-place (safely clamped to 0)
+                        tracer[k, j, i] = ti.max(0.0, tracer[k, j, i] + trend * dt_sub)
+                        
+                        # The flux leaving this cell becomes the flux entering the next cell down!
+                        flux_in = flux_out

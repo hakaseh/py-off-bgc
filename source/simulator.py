@@ -1,5 +1,5 @@
-import jax.numpy as jnp
 import numpy as np
+import taichi as ti
 import xarray as xr
 import pandas as pd
 import os
@@ -19,9 +19,9 @@ class OfflineSimulator:
                  tau_lateral=432000.0, 
                  tau_bottom=5184000.0,
                  tau_coast=432000.0, 
-                 is_global=False):
+                 is_global=False,
+                 forcing_save_flags=None):
         
-        # 1. Store settings
         self.bgc_model_choice = bgc_model_choice
         self.exp_name = exp_name
         self.dt_phys = dt_phys
@@ -32,82 +32,95 @@ class OfflineSimulator:
         self.tau_bottom = tau_bottom
         self.tau_coast = tau_coast
         self.is_global = is_global
+        self.forcing_save_flags = forcing_save_flags or {}      
         
-        # These will be set during prepare_forcing()
         self.bgc_model = None
         self.ds_clim = None
 
-    def prepare_forcing(self, 
-                        lat_range, 
-                        lon_range, 
-                        depth_range, 
-                        time_range, 
-                        ds_t, 
-                        ds_s, 
-                        ds_u, 
-                        ds_v, 
-                        ds_sw, 
-                        ds_wind, 
-                        ds_ice=None, 
-                        ds_k=None, 
-                        ds_clim=None, 
-                        ds_restart=None,
-                        glodap_dir=None
-                       ):
-        """
-        Subsets all datasets, handles missing inputs, and initializes the BGC model.
-        """
+    def prepare_forcing(self, lat_range, lon_range, depth_range, time_range, 
+                        ds_forcing, ds_clim=None, ds_restart=None, glodap_dir=None):
         print("Preparing and subsetting forcing datasets...")
         
-        # 1. Subset all core physical data
-        self.ds_t = ds_t.sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
-        self.ds_s = ds_s.sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
-        self.ds_u = ds_u.sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
-        self.ds_v = ds_v.sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
-        self.ds_sw = ds_sw.sel(time=time_range, lat=lat_range, lon=lon_range)
+        self.ds_t = ds_forcing["T"].sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
+        self.ds_s = ds_forcing["S"].sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
+        self.ds_u = ds_forcing["U"].sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
+        self.ds_v = ds_forcing["V"].sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
+        self.ds_sw = ds_forcing["SW"].sel(time=time_range, lat=lat_range, lon=lon_range)
 
-        # 2. Handle optional/missing data using the subsetted grid size
-        if ds_k is None:
-            print("  -> No Kz file provided. Using dummy array and parameterize Kz.")
+        if ds_forcing["K"] is None:
             self.ds_k = None
         else:
-            self.ds_k = ds_k.sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
+            self.ds_k = ds_forcing["K"].sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
 
-        if ds_wind is None:
-            print("  -> No wind file provided. Setting all to ZERO (no gas exchange).")
+        if ds_forcing["WIND"] is None:
             self.ds_wind = xr.zeros_like(self.ds_sw)
         else:
-            self.ds_wind = ds_wind.sel(time=time_range, lat=lat_range, lon=lon_range)
+            self.ds_wind = ds_forcing["WIND"].sel(time=time_range, lat=lat_range, lon=lon_range)
 
-        if ds_ice is None:
-            print("  -> No Ice file provided. Setting all to ONE (no ice cover).")
+        if ds_forcing["ICE"] is None:
             self.ds_ice = xr.ones_like(self.ds_sw)
         else:
-            self.ds_ice = ds_ice.sel(time=time_range, lat=lat_range, lon=lon_range)
+            self.ds_ice = ds_forcing["ICE"].sel(time=time_range, lat=lat_range, lon=lon_range)
 
-    # --- 3. BGC CLIMATOLOGY & RESTART ---
         if ds_clim is not None:
-            # User provided a pre-processed climatology file
             self.ds_clim = ds_clim.sel(depth=depth_range, lat=lat_range, lon=lon_range)
         elif glodap_dir is not None:
-            # User provided a directory; generate it on the fly!
             print("\nGenerating BGC climatology on-the-fly from GLODAP...")
-            
-            # Use the first timestep of our already-subsetted temperature grid as the exact template
             ref_template = self.ds_t.isel(time=0).squeeze()
-            
-            # Call your new function
             self.ds_clim = generate_restoring_climatology(ref_template, glodap_dir)
         else:
             self.ds_clim = None
 
         if ds_restart is not None:
-            ds_restart = ds_restart.squeeze().sel(depth=depth_range, lat=lat_range, lon=lon_range)
+            self.ds_restart = ds_restart.squeeze().sel(depth=depth_range, lat=lat_range, lon=lon_range)
+        else: self.ds_restart = None
 
-        # 4. Execute standard setup sequence
+        # Pre-load data entirely into Memory
+        print("Loading subsetted forcing data directly into RAM to bypass disk I/O...")
+        
+        # 1. Calculate total memory needed
+        total_bytes = (
+            self.ds_t.nbytes + self.ds_s.nbytes + self.ds_u.nbytes + 
+            self.ds_v.nbytes + self.ds_sw.nbytes + self.ds_wind.nbytes + self.ds_ice.nbytes
+        )
+        total_gb = total_bytes / (1024 ** 3)
+        print(f"  -> MEMORY CHECK: Total RAM required is ~{total_gb:.2f} GB")
+        
+        # Prevent Mac from crashing (Adjust the 12.0 GB limit based on your machine!)
+        if total_gb > 12.0:
+            print("  -> [ERROR] Dataset is too massive! Reduce DATE_BOUNDS or spatial bounds in config.yml.")
+            exit()
+
+        # 2. Load with progress tracking
+        print("  -> Loading T...")
+        self.ds_t.load()
+        print("  -> Loading S...")
+        self.ds_s.load()
+        print("  -> Loading U...")
+        self.ds_u.load()
+        print("  -> Loading V...")
+        self.ds_v.load()
+        print("  -> Loading SW...")
+        self.ds_sw.load()
+        print("  -> Loading WIND...")
+        self.ds_wind.load()
+        print("  -> Loading ICE...")
+        self.ds_ice.load()
+        
+        if getattr(self, 'ds_k', None) is not None: 
+            print("  -> Loading K...")
+            self.ds_k.load()
+        if getattr(self, 'ds_clim', None) is not None:
+            print("  -> Loading Climatology...")
+            self.ds_clim.load()
+        if getattr(self, 'ds_restart', None) is not None:
+            print("  -> Loading Restart...")
+            self.ds_restart.load()
+            
+        print("Data successfully loaded into RAM!")
+
         self.setup_grid()
         
-        # 5. Initialize the BGC Model now that the grid shape (nz, ny, nx) is known!
         print(f"Initializing BGC Model: {self.bgc_model_choice}...")
         self.bgc_model = bgc_models.get_model(self.bgc_model_choice, self.nz, self.ny, self.nx, self.water_mask, params=self.bgc_params)
         self.bgc_model.initialize(ds_restart=ds_restart, ds_clim=self.ds_clim)
@@ -119,7 +132,6 @@ class OfflineSimulator:
 
     def setup_grid(self):
         print("Initializing Grid...")
-        # 1. Metrics & Coordinates
         if self.ds_t['lat'].ndim == 2:
             self.dx, self.dy = physics.calculate_metrics_curvilinear(self.ds_t['lon'].values, self.ds_t['lat'].values)
             self.lon_2d = self.ds_t['lon'].values
@@ -128,53 +140,76 @@ class OfflineSimulator:
             self.dx, self.dy = physics.calculate_grid_metrics(self.ds_t)
             self.lon_2d, self.lat_2d = np.meshgrid(self.ds_t['lon'].values, self.ds_t['lat'].values)
             
-        # 2. Vertical Grid & Dimensions
         self.nz, self.ny, self.nx = self.ds_t.depth.size, self.ds_t.lat.size, self.ds_t.lon.size
         dz_1d = physics.calculate_dz_from_centers(self.ds_t['depth'].values)
         self.dz_3d = np.tile(dz_1d[:, None, None], (1, self.ny, self.nx))
         self.p_3d = self.ds_t['depth'].values[:, None, None]
         
-        # 3. Mask
         ref_val = self.ds_t.isel(time=0).values if 'time' in self.ds_t.dims else self.ds_t.values
         self.water_mask = ~np.isnan(ref_val) 
         self.dz_static = np.where(self.water_mask, self.dz_3d, 0.0)
         
-        # 4. Restoring Weights (Sponge)
         print("Generating Restoring Map...")
         self.nudge_map = physics.create_restoring_weights(
             self.water_mask, self.sponge_width, self.dt_phys, self.tau_lateral, self.tau_bottom, self.tau_coast, self.is_global
-        )
+        ).astype(np.float32)
+        
+        self.allocate_taichi_memory()
+
+    def allocate_taichi_memory(self):
+        print("Allocating GPU Memory (Taichi Fields)...")
+        # 3D Arrays
+        shape_3d = (self.nz, self.ny, self.nx)
+        self.ti_u = ti.field(dtype=ti.f32, shape=shape_3d)
+        self.ti_v = ti.field(dtype=ti.f32, shape=shape_3d)
+        self.ti_w = ti.field(dtype=ti.f32, shape=(self.nz + 1, self.ny, self.nx))        
+        self.ti_rho = ti.field(dtype=ti.f32, shape=shape_3d)
+        self.ti_kz = ti.field(dtype=ti.f32, shape=shape_3d)
+        self.ti_dz = ti.field(dtype=ti.f32, shape=shape_3d)
+        self.ti_tracer = ti.field(dtype=ti.f32, shape=shape_3d)
+        self.ti_tracer_new = ti.field(dtype=ti.f32, shape=shape_3d)
+        
+        # 2D Arrays
+        shape_2d = (self.ny, self.nx)
+        self.ti_dx = ti.field(dtype=ti.f32, shape=shape_2d)
+        self.ti_dy = ti.field(dtype=ti.f32, shape=shape_2d)
+        self.ti_mld = ti.field(dtype=ti.f32, shape=shape_2d)
+        
+        # O2 specific 2D fields
+        self.ti_o2_surf = ti.field(dtype=ti.f32, shape=shape_2d)
+        self.ti_o2_sat = ti.field(dtype=ti.f32, shape=shape_2d)
+        self.ti_temp_surf = ti.field(dtype=ti.f32, shape=shape_2d)
+        self.ti_wind_surf = ti.field(dtype=ti.f32, shape=shape_2d)
+        self.ti_ice_surf = ti.field(dtype=ti.f32, shape=shape_2d)
+        self.ti_dz_surf = ti.field(dtype=ti.f32, shape=shape_2d)
+
+        # Pre-load the static geometry fields onto the GPU
+        self.ti_dz.from_numpy(self.dz_static.astype(np.float32))
+        self.ti_dx.from_numpy(self.dx.astype(np.float32))
+        self.ti_dy.from_numpy(self.dy.astype(np.float32))
+        self.ti_dz_surf.from_numpy(self.dz_static[0, :, :].astype(np.float32))
 
     def setup_io(self):
         self.ds_template = self.ds_t.isel(time=0).drop_vars('time')
         self.out_dir = f"output/{self.exp_name}/{self.bgc_model_choice}"
         os.makedirs(self.out_dir, exist_ok=True)
 
-        # --- NEW: Generate and save static grid metrics ---
         static_grid_file = f"{self.out_dir}/static_grid_{self.exp_name}_{self.bgc_model_choice}.nc"
-        
         if not os.path.exists(static_grid_file):
             print("Generating Static Grid Metrics File...")
             ds_grid = physics.generate_static_grid(self.ds_template)
-            
-            # Save it once. 
             ds_grid.to_netcdf(static_grid_file)
-            print(f"  -> Saved {static_grid_file}")
 
-        
     def setup_restoring(self):
-        """Dynamically load restoring targets from the prepared climatology dataset."""
         self.restoring_data = {}
         if self.ds_clim is None:
-            print("  [Warning] No climatology dataset provided for restoring.")
             return
             
         print("Loading Restoring Targets (Sponge)...")
         for model_var in self.bgc_model.names:
             clim_var = GLODAP_MAP.get(model_var, model_var)
             if clim_var in self.ds_clim:
-                print(f"  -> Found restoring field for: {model_var}")
-                self.restoring_data[model_var] = np.nan_to_num(self.ds_clim[clim_var].values)
+                self.restoring_data[model_var] = np.nan_to_num(self.ds_clim[clim_var].values).astype(np.float32)
 
     def run(self): 
         nt = self.ds_t['time'].size
@@ -183,100 +218,101 @@ class OfflineSimulator:
         for day in range(nt):
             print(f"  Day {day+1} / {nt}")
             
-            # 1. Load Forcing (Directly from internally stored, subsetted datasets)
-            t = np.nan_to_num(self.ds_t.isel(time=day).values)
-            s = np.nan_to_num(self.ds_s.isel(time=day).values)            
-            u = np.nan_to_num(self.ds_u.isel(time=day).values)
-            v = np.nan_to_num(self.ds_v.isel(time=day).values)
-
-            # set negative salinity to zero (e.g. JCOPE2M)
-            s = s = np.maximum(s, 0.0)
-            sw = np.nan_to_num(self.ds_sw.isel(time=day).values)
-            wind_surf = np.nan_to_num(self.ds_wind.isel(time=day).values) 
-            ice_surf = np.nan_to_num(self.ds_ice.isel(time=day).values)            
+            # 1. Load Forcing 
+            t = np.nan_to_num(self.ds_t.isel(time=day).values).copy()
+            s = np.nan_to_num(self.ds_s.isel(time=day).values).copy()            
+            u = np.nan_to_num(self.ds_u.isel(time=day).values).copy()
+            v = np.nan_to_num(self.ds_v.isel(time=day).values).copy()
+            s = np.maximum(s, 0.0)
             
-            # 2. Calculate potential density anomaly and MLD           
+            sw = np.nan_to_num(self.ds_sw.isel(time=day).values).copy()
+            wind_surf = np.nan_to_num(self.ds_wind.isel(time=day).values).copy() 
+            ice_surf = np.nan_to_num(self.ds_ice.isel(time=day).values).copy()            
+            
+            # 2. Physics & State Setup
             SA = gsw.SA_from_SP(s, self.p_3d, self.lon_2d, self.lat_2d)
             CT = gsw.CT_from_pt(SA, t)
-            rho_3d = gsw.sigma0(SA, CT)
-            
-            # Re-mask the calculated density back to 0.0 over land
-            rho_3d = np.where(self.water_mask, rho_3d, 0.0)
-            
-            self.mld_2d = physics.calculate_mld(rho_3d, self.dz_static)
-            
-            if self.ds_k is None:
-                k = physics.calculate_full_kz_jax(self.mld_2d, rho_3d, self.dz_3d)
-            else:
-                k = np.nan_to_num(self.ds_k.isel(time=day).values)
-            
-            # Calc W
+            rho_3d = np.where(self.water_mask, gsw.sigma0(SA, CT), 0.0)
             u[~self.water_mask] = 0.0
             v[~self.water_mask] = 0.0
-            w = physics.calculate_w_rigid_lid(u, v, self.dz_static, self.dx, self.dy)  
-            
-            # Calculate O2 Saturation ONCE per day
-            if "oxygen" in self.bgc_model.tracers:
-                salt_surf = s[0, :, :]
-                temp_surf = t[0, :, :]
-                rho_surf = rho_3d[0, :, :]
-                o2_sat_umol_kg = gsw.O2sol_SP_pt(salt_surf, temp_surf)
-                o2_sat_mmol_m3 = o2_sat_umol_kg * (rho_surf / 1000.0)
-            
 
-            # --- SUB-STEPPED LOOP (Physics + Biology + Restoring) ---
+            # --- Push daily arrays to the GPU ---
+            self.ti_u.from_numpy(u.astype(np.float32))
+            self.ti_v.from_numpy(v.astype(np.float32))
+            self.ti_rho.from_numpy(rho_3d.astype(np.float32))
+            
+            # --- Execute Taichi Physics Kernels ---
+            physics.calculate_w_rigid_lid_ti(self.ti_u, self.ti_v, self.ti_dz, self.ti_dx, self.ti_dy, self.ti_w)
+            physics.calculate_mld_ti(self.ti_rho, self.ti_dz, self.ti_mld)
+            
+            if self.ds_k is None:
+                physics.calculate_full_kz_ti(self.ti_mld, self.ti_rho, self.ti_dz, self.ti_kz, 1e-2, 1e-6, 1e-5, 1e-4)
+            else:
+                k_val = np.nan_to_num(self.ds_k.isel(time=day).values).copy()
+                self.ti_kz.from_numpy(k_val.astype(np.float32))
+
+            # Pull mld and kz back to CPU for I/O saving later
+            mld_2d_np = self.ti_mld.to_numpy()
+            kz_3d_np = self.ti_kz.to_numpy()
+            
+            if "oxygen" in self.bgc_model.tracers:
+                o2_sat_umol_kg = gsw.O2sol_SP_pt(s[0, :, :], t[0, :, :])
+                o2_sat_mmol_m3 = o2_sat_umol_kg * (rho_3d[0, :, :] / 1000.0)
+            
+            is_glob_int = 1 if self.is_global else 0
+
+            # --- SUB-STEPPED LOOP ---
             for step in range(self.steps_per_day):
                 
-                # A. PHYSICS
+                # A. PHYSICS (TAICHI GPU)
                 for name, tr_data in self.bgc_model.tracers.items():
-                    # The @jax.jit decorator automatically compiles the math 
-                    # on the very first time step, making the remaining steps incredibly fast.
-                    tr_adv = physics.advection_neumann_jax(tr_data, u, v, w, self.dz_static, self.dt_phys, self.dx, self.dy, is_global=self.is_global)
-                    tr_mix = physics.diffusion_robust_jax(tr_adv, k, self.dz_static, self.dt_phys)
+                    # Stream CPU array to GPU
+                    self.ti_tracer.from_numpy(tr_data.astype(np.float32))
+                    
+                    # Compute advection & diffusion directly on the GPU
+                    physics.advection_neumann_ti(self.ti_tracer, self.ti_tracer_new, self.ti_u, self.ti_v, self.ti_w, self.ti_dz, self.ti_dx, self.ti_dy, float(self.dt_phys), is_glob_int)
+                    physics.diffusion_robust_ti(self.ti_tracer_new, self.ti_kz, self.ti_dz, float(self.dt_phys))
                         
-                    # CLAMP #1: Immediately after physics to fix advection overshoots (JAX compliant)
-                    self.bgc_model.tracers[name] = jnp.maximum(tr_mix, 0.0)
+                    # Stream updated array back to CPU and clamp
+                    self.bgc_model.tracers[name] = np.maximum(self.ti_tracer_new.to_numpy(), 0.0)
 
-                # B. RESTORING
+                # B. RESTORING (TAICHI)
                 for var_name, clim_data in self.restoring_data.items():
-                    diff = clim_data - self.bgc_model.tracers[var_name]
-                    # FIX: Cannot use += on JAX arrays. Must reassign.
-                    self.bgc_model.tracers[var_name] = self.bgc_model.tracers[var_name] + (diff * self.nudge_map)
+                    physics.apply_restoring_ti(
+                        self.bgc_model.tracers[var_name], 
+                        clim_data, 
+                        self.nudge_map
+                    )
 
-                # C. BIOLOGY & SINKING
+                # C. BIOLOGY & SINKING (NUMBA CPU)
                 par_3d = self.bgc_model.biology_step(t, sw, self.dz_static, self.dt_phys)
                 self.bgc_model.sinking_step(self.dz_static, self.dt_phys)
 
-                # CLAMP #2: Immediately after biology/sinking (JAX compliant)
                 for name, tr_data in self.bgc_model.tracers.items():
-                    self.bgc_model.tracers[name] = jnp.maximum(tr_data, 0.0)
+                    self.bgc_model.tracers[name] = np.maximum(tr_data, 0.0)
 
-                # D. AIR-SEA FLUX (OXYGEN)
+                # D. AIR-SEA FLUX (TAICHI GPU)
                 if "oxygen" in self.bgc_model.tracers:
-                    o2_surf = self.bgc_model.tracers["oxygen"][0, :, :]
-                    temp_surf = t[0, :, :]
-                    dz_surf = self.dz_static[0, :, :]
+                    self.ti_o2_surf.from_numpy(self.bgc_model.tracers["oxygen"][0, :, :].astype(np.float32))
+                    self.ti_o2_sat.from_numpy(o2_sat_mmol_m3.astype(np.float32))
+                    self.ti_temp_surf.from_numpy(t[0, :, :].astype(np.float32))
+                    self.ti_wind_surf.from_numpy(wind_surf.astype(np.float32))
+                    self.ti_ice_surf.from_numpy(ice_surf.astype(np.float32))
                     
-                    # FIX: Called the _jax function
-                    updated_o2_surf = physics.calc_o2_flux(
-                        o2_surf, o2_sat_mmol_m3, temp_surf, wind_surf, 
-                        ice_surf, dz_surf, self.dt_phys
-                    )
-                    # FIX: JAX slice reassignment
-                    self.bgc_model.tracers["oxygen"] = self.bgc_model.tracers["oxygen"].at[0, :, :].set(
-                        jnp.maximum(updated_o2_surf, 0.0)
-                    )
+                    physics.calc_o2_flux_ti(self.ti_o2_surf, self.ti_o2_sat, self.ti_temp_surf, self.ti_wind_surf, self.ti_ice_surf, self.ti_dz_surf, float(self.dt_phys))
+                    
+                    self.bgc_model.tracers["oxygen"][0, :, :] = np.maximum(self.ti_o2_surf.to_numpy(), 0.0)
                 
-            # Save Output              
-            self.save_day(day, self.ds_t.isel(time=day).time.values, par_3d, rho_3d, k, t, s, u, v)
+            # Save Output
+            # Note: We pass the pulled NumPy mld and kz arrays
+            self.save_day(day, self.ds_t.isel(time=day).time.values, par_3d, rho_3d, kz_3d_np, t, s, u, v, mld_2d_np, sw, wind_surf, ice_surf)
 
-    def save_day(self, day, current_time, par_3d, rho_3d, k, t, s, u, v):
+    def save_day(self, day, current_time, par_3d, rho_3d, kz_3d_np, t, s, u, v, mld_2d_np, sw, wind_surf, ice_surf):
         
         data_map = {name: arr for name, arr in self.bgc_model.tracers.items()}
         data_map['PAR'] = par_3d
         ds_out = xr.Dataset(coords=self.ds_template.coords)
         
-        # This loop handles tracers and PAR
         for var, arr in data_map.items():
             arr_np = np.asarray(arr)
             ds_out[var] = (self.ds_template.dims, np.where(self.water_mask, arr_np, np.nan))
@@ -290,34 +326,29 @@ class OfflineSimulator:
         dims_2d = [dim for dim in self.ds_template.dims if dim != 'depth']
         mask_2d = self.water_mask[0, :, :] 
         
-        rho_np = np.asarray(rho_3d)
-        ds_out['sigma0'] = (self.ds_template.dims, np.where(self.water_mask, rho_np, np.nan))
+        ds_out['sigma0'] = (self.ds_template.dims, np.where(self.water_mask, rho_3d, np.nan))
         ds_out['sigma0'].attrs = {'units': 'kg/m3', 'long_name': 'Potential Density Anomaly (Sigma-0)'}
 
-        # --- Save Diffusivity ---
-        kz_np = np.asarray(k)
-        ds_out['kz'] = (self.ds_template.dims, np.where(self.water_mask, kz_np, np.nan))
-        ds_out['kz'].attrs = {'units': 'm2/s', 'long_name': 'Vertical Eddy Diffusivity'}
-
-        # --- Save Diffusivity ---
-        t_np = np.asarray(t)
-        ds_out['t'] = (self.ds_template.dims, np.where(self.water_mask, t_np, np.nan))
-        ds_out['t'].attrs = {'units': 'celcius', 'long_name': 'Temperature'}
-        s_np = np.asarray(s)
-        ds_out['s'] = (self.ds_template.dims, np.where(self.water_mask, s_np, np.nan))
-        ds_out['s'].attrs = {'units': 'psu', 'long_name': 'Salinity'}
-        u_np = np.asarray(u)
-        ds_out['u'] = (self.ds_template.dims, np.where(self.water_mask, u_np, np.nan))
-        ds_out['u'].attrs = {'units': 'm/s', 'long_name': 'Zonal velocity'}
-        v_np = np.asarray(v)
-        ds_out['v'] = (self.ds_template.dims, np.where(self.water_mask, v_np, np.nan))
-        ds_out['v'].attrs = {'units': 'm/s', 'long_name': 'Meridional velocity'}
-
-        # Pull mld back to numpy
-        mld_np = np.asarray(self.mld_2d)
-        ds_out['MLD'] = (dims_2d, np.where(mask_2d, mld_np, np.nan))
+        ds_out['MLD'] = (dims_2d, np.where(mask_2d, mld_2d_np, np.nan))
         ds_out['MLD'].attrs = {'units': 'm', 'long_name': 'Mixed Layer Depth'}
-            
+
+        forcing_map = {
+            'T': {'data': t, 'units': 'celcius', 'long_name': 'Temperature'},
+            'S': {'data': s, 'units': 'psu', 'long_name': 'Salinity'},
+            'U': {'data': u, 'units': 'm/s', 'long_name': 'Zonal velocity'},
+            'V': {'data': v, 'units': 'm/s', 'long_name': 'Meridional velocity'},
+            'K': {'data': kz_3d_np, 'units': 'm2/s', 'long_name': 'Vertical eddy diffusivity'},
+            'SW': {'data': sw, 'units': 'W/m2', 'long_name': 'Shortwave radiation'},
+            'WIND': {'data': wind_surf, 'units': 'm/s', 'long_name': 'Wind speed'},
+            'ICE': {'data': ice_surf, 'units': '-', 'long_name': 'Sea ice concentration'}
+        }
+
+        for yaml_key, meta in forcing_map.items():
+            # Check the dictionary stored in __init__
+            if self.forcing_save_flags.get(yaml_key, False):
+                ds_out[yaml_key] = (self.ds_template.dims, np.where(self.water_mask, meta['data'], np.nan))
+                ds_out[yaml_key].attrs = {'units': meta['units'], 'long_name': meta['long_name']}
+
         ds_out = ds_out.expand_dims(time=[current_time])
         t_str = pd.to_datetime(current_time).strftime('%Y%m%d')
         fname = f"{self.out_dir}/output_{self.exp_name}_{self.bgc_model_choice}_{t_str}.nc"
@@ -327,13 +358,11 @@ class OfflineSimulator:
             except PermissionError:
                 print(f"  [Error] Cannot overwrite {fname}. Skipping save.")
                 return 
-                
-        comp = dict(zlib=True, complevel=1)
-        enc = {v: comp for v in ds_out.data_vars}
-        ds_out.to_netcdf(fname, encoding=enc)
+        # Save. Note we do not compress because it is a bottleneck.
+        # Apply compression as post-processing if necessary.
+        ds_out.to_netcdf(fname)
         
         print(f"    -> Saved {fname}")
         if 'nitrate' in data_map:
-            # Use numpy on the pulled array
             nit_np = np.asarray(data_map['nitrate'])
             print(f"    -> Nitrate Mean, Min, Max: {np.nanmean(nit_np):.1f}, {np.nanmin(nit_np):.1f}, {np.nanmax(nit_np):.1f}")

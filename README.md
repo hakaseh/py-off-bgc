@@ -32,6 +32,8 @@ copernicusmarine login
 
 ### An example test case: GOEPR_ERA5_Hokkaido
 
+* Setup the CDS API key to allow ERA5 data download by following [this guide](https://cds.climate.copernicus.eu/how-to-api).
+
 * Download the forcing dataset from [Zenodo](https://zenodo.org/records/19703262).
 ```
 mkdir input/GOEPR_ERA5_Hokkaido

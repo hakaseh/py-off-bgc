@@ -1,0 +1,69 @@
+# Variables used in all programs
+LON_BOUNDS: [140, 150]
+LAT_BOUNDS: [40, 50]
+DEPTH_BOUNDS: [null, 200]
+DATE_BOUNDS: ["20240101", "20241231"]
+
+# Variables used in prep_ocean.py
+OCEAN_SOURCE: null #"copernicus_goepr"
+
+# Variables used in prep_atmos.py
+ATMOS_SOURCE: "cds_era5"
+REF_OCEAN: "copernicus_goepr_thetao_mean_20240101-20241231.nc"
+VAR_OCEAN: "thetao_mean"
+
+# Variables used in run.py
+BGC_MODEL: "NEMURO"
+DT_SEC: 3600.0
+USE_GPU: true
+MAX_THREADS: null
+
+FORCING:
+  T:
+    FILE: "copernicus_goepr_thetao_mean_20240101-20241231.nc"
+    NAME: "thetao_mean"
+    SAVE: true
+  S:
+    FILE: "copernicus_goepr_so_mean_20240101-20241231.nc"
+    NAME: "so_mean"
+    SAVE: true
+  U:
+    FILE: "copernicus_goepr_uo_mean_20240101-20241231.nc"
+    NAME: "uo_mean"
+    SAVE: true
+  V:
+    FILE: "copernicus_goepr_vo_mean_20240101-20241231.nc"
+    NAME: "vo_mean"
+    SAVE: true
+  SW:
+    FILE: "cds_era5_solar_2024*.nc"
+    NAME: "avg_sdswrf"
+    SAVE: true
+  WIND:
+    FILE: null
+    NAME: null
+    SAVE: true
+  WIND_U:
+    FILE: "cds_era5_wind_2024*.nc"
+    NAME: "u10"
+  WIND_V:
+    FILE: "cds_era5_wind_2024*.nc"
+    NAME: "v10"
+  ICE:
+    FILE: "copernicus_goepr_siconc_mean_20240101-20241231.nc"
+    NAME: "siconc_mean"
+    SAVE: true
+  K:
+    FILE: null
+    NAME: null
+    SAVE: true
+
+SPONGE_WIDTH: 1
+TAU_LATERAL: 86400.0
+TAU_BOTTOM: 2592000.0
+TAU_COAST: 86400.0
+IS_GLOBAL: false
+
+RESTART_FILE: "output/hokkaido2024/NEMURO/output_hokkaido2024_NEMURO_20241231.nc"
+CLIM_FILE: null
+GLODAP_DIR: "climatology/GLODAPv2.2016b.MappedClimatologies/"

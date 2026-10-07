@@ -4,23 +4,19 @@ channels:
   - defaults
 dependencies:
   - python
+  - glob
   - xarray
-  - cartopy
   - dask
   - distributed
   - netcdf4
-  - numba
   - numpy
   - scipy
   - pandas
   - gsw
-  - matplotlib
-  - ipykernel
-  - jax
-  - zenodo_get
   - h5py
   - h5netcdf
   - bottleneck
-  - zarr
-  - gcsfs
   - copernicusmarine
+  - taichi
+  - pyyaml
+  - cdsapi

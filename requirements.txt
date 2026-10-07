@@ -1,5 +1,5 @@
+glob
 xarray 
-cartopy
 dask 
 distributed 
 netCDF4 
@@ -8,13 +8,10 @@ numpy
 scipy 
 pandas
 gsw
-matplotlib
-ipykernel
-jax
-zenodo_get
 h5py
 h5netcdf
 bottleneck
-zarr
-gcsfs
 copernicusmarine
+taichi
+pyyaml
+cdsapi
