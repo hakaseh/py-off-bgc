@@ -1,6 +1,7 @@
 # py-off-bgc: a Python-based offline simulator for ocean biogeochemistry
 
 ## 🚀 Getting Started
+* py-off-bgc requires that the version of your Python is compatible with Taichi. Check the Python version associated with the latest release of Taichi from [here](https://pypi.org/project/taichi/#files) and make sure to use that version of below for the installation of py-off-bgc.
 
 * Install py-off-bgc
 
