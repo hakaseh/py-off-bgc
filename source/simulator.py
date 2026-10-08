@@ -38,7 +38,7 @@ class OfflineSimulator:
         self.ds_clim = None
 
     def prepare_forcing(self, lat_range, lon_range, depth_range, time_range, 
-                        ds_forcing, ds_clim=None, ds_restart=None, glodap_dir=None):
+                        ds_forcing, ds_clim=None, ds_restart=None):
         print("Preparing and subsetting forcing datasets...")
         
         self.ds_t = ds_forcing["T"].sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
@@ -64,10 +64,6 @@ class OfflineSimulator:
 
         if ds_clim is not None:
             self.ds_clim = ds_clim.sel(depth=depth_range, lat=lat_range, lon=lon_range)
-        elif glodap_dir is not None:
-            print("\nGenerating BGC climatology on-the-fly from GLODAP...")
-            ref_template = self.ds_t.isel(time=0).squeeze()
-            self.ds_clim = generate_restoring_climatology(ref_template, glodap_dir)
         else:
             self.ds_clim = None
 

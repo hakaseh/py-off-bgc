@@ -30,6 +30,10 @@ copernicusmarine login
 ```
 (When prompted, enter the username and password)
 
+### Climatology
+
+Download GLODAPv2.2016b from [here](https://glodap.info/index.php/mapped-data-product/#:~:text=Mapped%20Data%20Product%20files). Unzip the zip file and place the unzipped directory in `py-off-bgc/climatology/`.
+
 ### An example test case: GOEPR_ERA5_Hokkaido
 
 * Setup the CDS API key to allow ERA5 data download by following [this guide](https://cds.climate.copernicus.eu/how-to-api).

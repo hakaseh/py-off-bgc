@@ -8,7 +8,7 @@ import cdsapi
 import pandas as pd
 import io
 import requests
-
+from source.climatology import generate_restoring_climatology
 
 # Main program
 def download_input(cfg, run_name):
@@ -172,7 +172,31 @@ def download_input(cfg, run_name):
                     ds_solar.to_netcdf(raw_solar_fname)
                 else:
                     print(f"Raw solar file {raw_solar_fname} already exists. Skipping.")
-                                   
+
+
+def generate_climatology(cfg, run_name):
+    glodap_dir = cfg.get('GLODAP_DIR')
+    if not glodap_dir:
+        print("No GLODAP_DIR specified. Skipping climatology generation.")
+        return
+
+    clim_out_path = f"input/{run_name}/bgc_climatology_{run_name}.nc"
+    if not os.path.exists(clim_out_path):
+        # Use your already-downloaded reference ocean file to get the 3D grid
+        ref_ocean_file = f"input/{run_name}/{cfg['REF_OCEAN']}"
+        
+        print("\nGenerating BGC climatology from GLODAP...")
+        # Load one time step to get depth, lat, lon
+        ds_ref = xr.open_dataset(ref_ocean_file)[cfg['VAR_OCEAN']].isel(time=0).squeeze()
+        
+        # Generate the climatology
+        ds_clim = generate_restoring_climatology(ds_ref, glodap_dir)
+        
+        # Save it to the input directory
+        ds_clim.to_netcdf(clim_out_path)
+        print(f"Saved static climatology to: {clim_out_path}")    
+    else:
+        print(f"{clim_out_path} already exits. Skipping.")                              
 
 # Rename from raw files
 def rename_ds(ds):    
@@ -217,3 +241,4 @@ if __name__ == "__main__":
 
     # Run the program
     download_input(cfg, run_name)
+    generate_climatology(cfg, run_name)

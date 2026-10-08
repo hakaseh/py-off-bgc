@@ -6,11 +6,10 @@ DATE_BOUNDS: ["20240101", "20241231"]
 
 # Variables used in prep.py
 OCEAN_SOURCE: "copernicus_goepr"
-
-# Variables used in prep.py
 ATMOS_SOURCE: "cds_era5"
 REF_OCEAN: "copernicus_goepr_thetao_mean_20240101-20241231.nc"
 VAR_OCEAN: "thetao_mean"
+GLODAP_DIR: "climatology/GLODAPv2.2016b_MappedClimatologies"
 
 # Variables used in run.py
 BGC_MODEL: "NEMURO"
@@ -65,5 +64,4 @@ TAU_COAST: 86400.0
 IS_GLOBAL: false
 
 RESTART_FILE: null #"output_hokkaido2024_NEMURO_20241231.nc"
-CLIM_FILE: null
-GLODAP_DIR: "climatology/GLODAPv2.2016b.MappedClimatologies/"
+CLIM_FILE: "bgc_climatology_hokkaido2024.nc"

@@ -32,7 +32,7 @@ def _load_local_var(filepath, varname):
     rename_dict = {k: v for k, v in rename_map.items() if k in ds.dims}
     return ds.rename(rename_dict)[varname]
 
-def run_simulation(cfg, config_file_path):
+def run_simulation(cfg, config_file_path, run_name):
     # Initialize Taichi (Allows config to toggle GPU/CPU)
     if cfg.get('USE_GPU', False) == True:
         ti.init(arch=ti.metal, default_fp=ti.f32)
@@ -71,9 +71,9 @@ def run_simulation(cfg, config_file_path):
         if not file_path:
             datasets[var_key] = None
             continue
-            
-        print(f"Loading {var_key} from {file_path}...")
         
+        file_path = f"input/{run_name}/{file_path}"
+        print(f"Loading {var_key} from {file_path}...")
         datasets[var_key] = _load_local_var(file_path, internal_name)
   
         # Optional daily resampling for atmospheric data
@@ -86,8 +86,8 @@ def run_simulation(cfg, config_file_path):
             datasets["WIND"] = np.sqrt(datasets["WIND_U"]**2 + datasets["WIND_V"]**2)
 
     # BGC Inputs
-    ds_clim = xr.open_mfdataset(cfg['CLIM_FILE']) if cfg['CLIM_FILE'] else None
-    ds_restart = xr.open_dataset(cfg['RESTART_FILE']).squeeze() if cfg['RESTART_FILE'] else None
+    ds_clim = xr.open_dataset(f"input/{run_name}/{cfg['CLIM_FILE']}") if cfg['CLIM_FILE'] else None
+    ds_restart = xr.open_dataset(f"output/{run_name}/{cfg['RESTART_FILE']}").squeeze() if cfg['RESTART_FILE'] else None
 
     save_flags = {key: val.get('SAVE', False) for key, val in cfg['FORCING'].items()}
 
@@ -102,7 +102,7 @@ def run_simulation(cfg, config_file_path):
 
     sim.prepare_forcing(
         lat_range=lat_range, lon_range=lon_range, depth_range=depth_range, time_range=time_range,
-        ds_forcing=datasets, ds_clim=ds_clim, glodap_dir=cfg.get('GLODAP_DIR'), ds_restart=ds_restart)
+        ds_forcing=datasets, ds_clim=ds_clim, ds_restart=ds_restart)
 
     shutil.copy(config_file_path, os.path.join(sim.out_dir, os.path.basename(config_file_path)))
     sim.run()
@@ -133,4 +133,4 @@ if __name__ == "__main__":
     print(f"Starting experiment: {run_name}")
 
     # Run the simulation
-    run_simulation(cfg, config_file_path)
+    run_simulation(cfg, config_file_path, run_name)
