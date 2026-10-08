@@ -11,7 +11,7 @@ import requests
 
 
 # Main program
-def download_input(cfg, config_file_path):
+def download_input(cfg, run_name):
 
     ocean_source = cfg["OCEAN_SOURCE"]
     atmos_source = cfg["ATMOS_SOURCE"]
@@ -40,43 +40,49 @@ def download_input(cfg, config_file_path):
      
         # Loop over the 3D variables
         for i in range(len(list_3d)):
-            ds = copernicusmarine.open_dataset(
-                dataset_id = id_data, 
-                variables = [list_3d[i]],
-                minimum_longitude = lon0,
-                maximum_longitude = lon1,
-                minimum_latitude = lat0,
-                maximum_latitude = lat1,
-                minimum_depth = dep0,
-                maximum_depth = dep1,
-                start_datetime = date0,
-                end_datetime = date1
-            )
-            ds = ds.rename({"latitude": "lat", "longitude": "lon"})
-            fname = f"input/{run_name}/{ocean_source}_{list_3d[i]}_{date0}-{date1}.nc"
-            ds.to_netcdf(fname)
-            print(f"Saved: {fname}")
-            
+            fname = f"input/{run_name}/{ocean_source}_{list_3d[i]}_{date0}-{date1}.nc"            
+            if not os.path.exists(fname):
+                ds = copernicusmarine.open_dataset(
+                    dataset_id = id_data, 
+                    variables = [list_3d[i]],
+                    minimum_longitude = lon0,
+                    maximum_longitude = lon1,
+                    minimum_latitude = lat0,
+                    maximum_latitude = lat1,
+                    minimum_depth = dep0,
+                    maximum_depth = dep1,
+                    start_datetime = date0,
+                    end_datetime = date1
+                )
+                ds = ds.rename({"latitude": "lat", "longitude": "lon"})
+                ds.to_netcdf(fname)
+                print(f"Saved: {fname}")
+            else:
+                print(f"{fname} already exists. skipped.")
+
             if i == 0:
                 # store the reference grid
-                ds_ref = ds
+                ds_ref = xr.open_dataset(fname)
 
         # Loop over the 2D variables (e.g., sea ice concentration)
         for i in range(len(list_2d)):
-            ds = copernicusmarine.open_dataset(
-                dataset_id = id_data, 
-                variables = [list_2d[i]],
-                minimum_longitude = lon0,
-                maximum_longitude = lon1,
-                minimum_latitude = lat0,
-                maximum_latitude = lat1,
-                start_datetime = date0,
-                end_datetime = date1
-            )
-            ds = ds.rename({"latitude": "lat", "longitude": "lon"})
-            fname = f"input/{run_name}/{ocean_source}_{list_2d[i]}_{date0}-{date1}.nc"
-            ds.to_netcdf(fname)
-            print(f"Saved: {fname}")
+            if not os.path.exists(fname):
+                fname = f"input/{run_name}/{ocean_source}_{list_2d[i]}_{date0}-{date1}.nc"
+                ds = copernicusmarine.open_dataset(
+                    dataset_id = id_data, 
+                    variables = [list_2d[i]],
+                    minimum_longitude = lon0,
+                    maximum_longitude = lon1,
+                    minimum_latitude = lat0,
+                    maximum_latitude = lat1,
+                    start_datetime = date0,
+                    end_datetime = date1
+                )
+                ds = ds.rename({"latitude": "lat", "longitude": "lon"})
+                ds.to_netcdf(fname)
+                print(f"Saved: {fname}")
+            else:
+                print(f"{fname} already exists. skipped.")                
 
     # Use the existing ocean data for atmos interpolation
     else:
@@ -210,4 +216,4 @@ if __name__ == "__main__":
     os.makedirs(f"input/{run_name}", exist_ok=True)
 
     # Run the program
-    download_input(cfg, config_file_path)
+    download_input(cfg, run_name)
