@@ -74,7 +74,7 @@ def run_simulation(cfg, config_file_path):
             
         print(f"Loading {var_key} from {file_path}...")
         
-        datasets[var_key] = _load_local_var(f"input/{run_name}/{file_path}", internal_name)
+        datasets[var_key] = _load_local_var(file_path, internal_name)
   
         # Optional daily resampling for atmospheric data
 #        if cfg.get('RESAMPLE_ATMOS_DAILY', False):
@@ -93,7 +93,7 @@ def run_simulation(cfg, config_file_path):
 
     # Initialize Simulator
     sim = OfflineSimulator(
-        bgc_model_choice=cfg['BGC_MODEL'], exp_name=cfg['EXP_NAME'],
+        bgc_model_choice=cfg['BGC_MODEL'], exp_name=run_name,
         dt_phys=cfg['DT_SEC'], sponge_width=cfg['SPONGE_WIDTH'],
         tau_lateral=cfg['TAU_LATERAL'], tau_bottom=cfg['TAU_BOTTOM'], 
         tau_coast=cfg['TAU_COAST'], is_global=cfg.get('IS_GLOBAL', False),
@@ -130,7 +130,6 @@ if __name__ == "__main__":
     run_name = os.path.splitext(os.path.basename(config_file_path))[0]
     
     # Dynamically overwrite the EXP_NAME in the dictionary
-    cfg['EXP_NAME'] = run_name
     print(f"Starting experiment: {run_name}")
 
     # Run the simulation

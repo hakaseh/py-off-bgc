@@ -194,7 +194,7 @@ class OfflineSimulator:
         self.out_dir = f"output/{self.exp_name}/{self.bgc_model_choice}"
         os.makedirs(self.out_dir, exist_ok=True)
 
-        static_grid_file = f"{self.out_dir}/static_grid_{self.exp_name}_{self.bgc_model_choice}.nc"
+        static_grid_file = f"{self.out_dir}/static_grid_{self.exp_name}.nc"
         if not os.path.exists(static_grid_file):
             print("Generating Static Grid Metrics File...")
             ds_grid = physics.generate_static_grid(self.ds_template)
