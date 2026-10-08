@@ -4,10 +4,10 @@ LAT_BOUNDS: [40, 50]
 DEPTH_BOUNDS: [null, 200]
 DATE_BOUNDS: ["20240101", "20241231"]
 
-# Variables used in prep_ocean.py
-OCEAN_SOURCE: null #"copernicus_goepr"
+# Variables used in prep.py
+OCEAN_SOURCE: "copernicus_goepr"
 
-# Variables used in prep_atmos.py
+# Variables used in prep.py
 ATMOS_SOURCE: "cds_era5"
 REF_OCEAN: "copernicus_goepr_thetao_mean_20240101-20241231.nc"
 VAR_OCEAN: "thetao_mean"
@@ -15,7 +15,7 @@ VAR_OCEAN: "thetao_mean"
 # Variables used in run.py
 BGC_MODEL: "NEMURO"
 DT_SEC: 3600.0
-USE_GPU: true
+USE_GPU: false
 MAX_THREADS: null
 
 FORCING:
@@ -64,6 +64,6 @@ TAU_BOTTOM: 2592000.0
 TAU_COAST: 86400.0
 IS_GLOBAL: false
 
-RESTART_FILE: "output/hokkaido2024/NEMURO/output_hokkaido2024_NEMURO_20241231.nc"
+RESTART_FILE: null #"output_hokkaido2024_NEMURO_20241231.nc"
 CLIM_FILE: null
 GLODAP_DIR: "climatology/GLODAPv2.2016b.MappedClimatologies/"

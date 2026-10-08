@@ -1,4 +1,3 @@
-glob
 xarray 
 dask 
 distributed 
