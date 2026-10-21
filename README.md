@@ -1,6 +1,7 @@
 # py-off-bgc: a Python-based offline simulator for ocean biogeochemistry
 
 ## 🚀 Getting Started
+
 * py-off-bgc requires that the version of your Python is compatible with Taichi. Check the Python version associated with the latest release of Taichi from [here](https://pypi.org/project/taichi/#files) and make sure to use that version of below for the installation of py-off-bgc.
 
 * Install py-off-bgc
@@ -20,39 +21,39 @@ source activate env
 
 Via Pip
 ```
-python3 -m venv env
+python -m venv env
 source env/bin/activate
 pip install -r requirements.txt
 ```
 
-* Enable password-less access to Copernicus marine datasets:
+* Add the environment to your Jupyter kernel (optional, but can be useful for analysis of the output using Jupyter)
+```
+python -m ipykernel install --user --name=env --display-name="py-off-bgc"
+```
+
+* Enable password-less access to Copernicus marine datasets (optional, but required for demo)
 ```
 copernicusmarine login
 ```
 (When prompted, enter the username and password)
 
-### Climatology
+* Setup the CDS API key to allow ERA5 data download by following [this guide](https://cds.climate.copernicus.eu/how-to-api) (optional, but required for demo).
 
-Download GLODAPv2.2016b from [here](https://glodap.info/index.php/mapped-data-product/#:~:text=Mapped%20Data%20Product%20files). Unzip the zip file and place the unzipped directory in `py-off-bgc/climatology/`.
 
-### An example test case: GOEPR_ERA5_Hokkaido
+* Download GLODAPv2.2016b from [here](https://glodap.info/index.php/mapped-data-product/#:~:text=Mapped%20Data%20Product%20files). Unzip the zip file and place the unzipped directory in `py-off-bgc/climatology/`.
 
-* Setup the CDS API key to allow ERA5 data download by following [this guide](https://cds.climate.copernicus.eu/how-to-api).
+## Demo (an example test case)
 
-* Download the forcing dataset from [Zenodo](https://zenodo.org/records/19703262).
 ```
-mkdir input/GOEPR_ERA5_Hokkaido
-cd input/GOEPR_ERA5_Hokkaido
-zenodo_get 19703262
+python prep.py config/hokkaido2024.yaml
 ```
 
-* Create the BGC climatology.
-* In your root directory, run the simulation
 ```
-cd;
-cd py-off-bgc
-python3 -m run.run_goepr
+python run.py config/hokkaido.yaml
 ```
+
+* GOEPR-ERA5-Hokkaido
+
 
 ## Run files (to be moved to run/README.md)
 * Rename to required dimension names (lon, lat, depth, time)

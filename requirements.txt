@@ -14,3 +14,5 @@ copernicusmarine
 taichi
 pyyaml
 cdsapi
+ipykernel
+matplotlib

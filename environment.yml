@@ -19,3 +19,5 @@ dependencies:
   - taichi
   - pyyaml
   - cdsapi
+  - ipykernel
+  - matplotlib

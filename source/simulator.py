@@ -322,7 +322,7 @@ class OfflineSimulator:
         dims_2d = [dim for dim in self.ds_template.dims if dim != 'depth']
         mask_2d = self.water_mask[0, :, :] 
         
-        ds_out['sigma0'] = (self.ds_template.dims, np.where(self.water_mask, rho_3d, np.nan))
+        ds_out['sigma0'] = (self.ds_template.dims, np.where(self.water_mask, rho_3d, np.nan).astype(np.float32))
         ds_out['sigma0'].attrs = {'units': 'kg/m3', 'long_name': 'Potential Density Anomaly (Sigma-0)'}
 
         ds_out['MLD'] = (dims_2d, np.where(mask_2d, mld_2d_np, np.nan))
