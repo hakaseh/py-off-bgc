@@ -66,8 +66,8 @@ def download_input(cfg, run_name):
 
         # Loop over the 2D variables (e.g., sea ice concentration)
         for i in range(len(list_2d)):
+            fname = f"input/{run_name}/{ocean_source}_{list_2d[i]}_{date0}-{date1}.nc"
             if not os.path.exists(fname):
-                fname = f"input/{run_name}/{ocean_source}_{list_2d[i]}_{date0}-{date1}.nc"
                 ds = copernicusmarine.open_dataset(
                     dataset_id = id_data, 
                     variables = [list_2d[i]],
