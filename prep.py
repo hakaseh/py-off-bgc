@@ -87,7 +87,7 @@ def download_input(cfg, run_name):
     # Use the existing ocean data for atmos interpolation
     else:
         # load the reference ocean input data (to which the atmos data are interpolated)
-        ds_ref = xr.open_dataset(f"input/{run_name}/{ref_ocean}")
+        ds_ref = xr.open_dataset(ref_ocean)
         ds_ref = rename_ds(ds_ref)
 
     if atmos_source is not None:
@@ -182,12 +182,9 @@ def generate_climatology(cfg, run_name):
 
     clim_out_path = f"input/{run_name}/bgc_climatology_{run_name}.nc"
     if not os.path.exists(clim_out_path):
-        # Use your already-downloaded reference ocean file to get the 3D grid
-        ref_ocean_file = f"input/{run_name}/{cfg['REF_OCEAN']}"
-        
         print("\nGenerating BGC climatology from GLODAP...")
         # Load one time step to get depth, lat, lon
-        ds_ref = xr.open_dataset(ref_ocean_file)[cfg['VAR_OCEAN']].isel(time=0).squeeze()
+        ds_ref = xr.open_dataset(cfg['REF_OCEAN'])[cfg['VAR_OCEAN']].isel(time=0).squeeze()
         
         # Generate the climatology
         ds_clim = generate_restoring_climatology(ds_ref, glodap_dir)

@@ -165,6 +165,9 @@ class OfflineSimulator:
         self.ti_tracer = ti.field(dtype=ti.f32, shape=shape_3d)
         self.ti_tracer_new = ti.field(dtype=ti.f32, shape=shape_3d)
         
+        self.ti_cp = ti.field(dtype=ti.f32, shape=shape_3d)
+        self.ti_dp = ti.field(dtype=ti.f32, shape=shape_3d)        
+
         # 2D Arrays
         shape_2d = (self.ny, self.nx)
         self.ti_dx = ti.field(dtype=ti.f32, shape=shape_2d)
@@ -266,8 +269,28 @@ class OfflineSimulator:
                     self.ti_tracer.from_numpy(tr_data.astype(np.float32))
                     
                     # Compute advection & diffusion directly on the GPU
-                    physics.advection_neumann_ti(self.ti_tracer, self.ti_tracer_new, self.ti_u, self.ti_v, self.ti_w, self.ti_dz, self.ti_dx, self.ti_dy, float(self.dt_phys), is_glob_int)
-                    physics.diffusion_robust_ti(self.ti_tracer_new, self.ti_kz, self.ti_dz, float(self.dt_phys))
+                    physics.advection_3d_tvd_ti(
+                        self.ti_tracer, 
+                        self.ti_tracer_new, 
+                        self.ti_u, 
+                        self.ti_v, 
+                        self.ti_w, 
+                        self.ti_dz, 
+                        self.ti_dx, 
+                        self.ti_dy, 
+                        float(self.dt_phys), 
+                        is_glob_int
+                    )
+                    physics.diffusion_implicit_vertical_ti(
+                        self.ti_tracer_new, 
+                        self.ti_kz, 
+                        self.ti_dz, 
+                        self.ti_cp, 
+                        self.ti_dp, 
+                        float(self.dt_phys)
+                    )
+                    #physics.advection_neumann_ti(self.ti_tracer, self.ti_tracer_new, self.ti_u, self.ti_v, self.ti_w, self.ti_dz, self.ti_dx, self.ti_dy, float(self.dt_phys), is_glob_int)
+                    #physics.diffusion_robust_ti(self.ti_tracer_new, self.ti_kz, self.ti_dz, float(self.dt_phys))
                         
                     # Stream updated array back to CPU and clamp
                     self.bgc_model.tracers[name] = np.maximum(self.ti_tracer_new.to_numpy(), 0.0)

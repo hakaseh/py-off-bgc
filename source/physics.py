@@ -130,6 +130,179 @@ def apply_restoring_ti(
 # ==========================================
 # 2. TAICHI GPU PHYSICS KERNELS
 # ==========================================
+@ti.func
+def van_leer_limiter(r):
+    """
+    Van Leer flux limiter: Smoothly limits gradients to prevent numerical diffusion
+    and preserve monotonicity (prevents negative concentrations).
+    """
+    return (r + ti.abs(r)) / (1.0 + ti.abs(r))
+
+@ti.kernel
+def advection_3d_tvd_ti(
+    tracer: ti.template(), tracer_new: ti.template(),
+    u: ti.template(), v: ti.template(), w: ti.template(),
+    dz: ti.template(), dx: ti.template(), dy: ti.template(),
+    dt: ti.f32, is_global: ti.i32
+):
+    nz, ny, nx = tracer.shape
+    
+    # 1. Copy over boundary values
+    for k, j, i in tracer:
+        tracer_new[k, j, i] = tracer[k, j, i]
+
+    # 2. Compute 3D TVD advection for the inner domain
+    for k, j, i in ti.ndrange((1, nz - 1), (1, ny - 1), nx):
+        if is_global == 0 and (i == 0 or i == nx - 1):
+            continue
+            
+        if dz[k, j, i] > 1e-6:
+            c = tracer[k, j, i]
+            
+            # ==========================================
+            # X-AXIS (Zonal) TVD
+            # ==========================================
+            u_val = u[k, j, i]
+            i_up = i - 1 if u_val > 0.0 else i + 1
+            i_up_up = i - 2 if u_val > 0.0 else i + 2
+            
+            # Handle periodic wrapping for global domains, clamping for regional
+            if is_global == 1:
+                if i_up < 0: i_up += nx
+                elif i_up >= nx: i_up -= nx
+                if i_up_up < 0: i_up_up += nx
+                elif i_up_up >= nx: i_up_up -= nx
+            else:
+                i_up = ti.max(0, ti.min(nx - 1, i_up))
+                i_up_up = ti.max(0, ti.min(nx - 1, i_up_up))
+                
+            c_up_x = tracer[k, j, i_up] if dz[k, j, i_up] > 1e-6 else c
+            c_up_up_x = tracer[k, j, i_up_up] if dz[k, j, i_up_up] > 1e-6 else c_up_x
+            
+            r_x = (c_up_x - c_up_up_x) / (c - c_up_x + 1e-10)
+            cfl_x = ti.abs(u_val) * dt / dx[j, i]
+            
+            flux_x = ti.abs(u_val) * (c - c_up_x) / dx[j, i]
+            corr_x = 0.5 * ti.abs(u_val) * (1.0 - cfl_x) * van_leer_limiter(r_x) * (c - c_up_x) / dx[j, i]
+            term_x = flux_x + corr_x
+
+            # ==========================================
+            # Y-AXIS (Meridional) TVD
+            # ==========================================
+            v_val = v[k, j, i]
+            j_up = j - 1 if v_val > 0.0 else j + 1
+            j_up_up = j - 2 if v_val > 0.0 else j + 2
+            
+            j_up = ti.max(0, ti.min(ny - 1, j_up))
+            j_up_up = ti.max(0, ti.min(ny - 1, j_up_up))
+            
+            c_up_y = tracer[k, j_up, i] if dz[k, j_up, i] > 1e-6 else c
+            c_up_up_y = tracer[k, j_up_up, i] if dz[k, j_up_up, i] > 1e-6 else c_up_y
+            
+            r_y = (c_up_y - c_up_up_y) / (c - c_up_y + 1e-10)
+            cfl_y = ti.abs(v_val) * dt / dy[j, i]
+            
+            flux_y = ti.abs(v_val) * (c - c_up_y) / dy[j, i]
+            corr_y = 0.5 * ti.abs(v_val) * (1.0 - cfl_y) * van_leer_limiter(r_y) * (c - c_up_y) / dy[j, i]
+            term_y = flux_y + corr_y
+
+            # ==========================================
+            # Z-AXIS (Vertical) TVD
+            # ==========================================
+            w_val = 0.5 * (w[k, j, i] + w[k+1, j, i]) if k < nz - 1 else 0.5 * w[k, j, i]
+            
+            k_up = k + 1 if w_val > 0.0 else k - 1
+            k_up_up = k + 2 if w_val > 0.0 else k - 2
+            
+            k_up = ti.max(0, ti.min(nz - 1, k_up))
+            k_up_up = ti.max(0, ti.min(nz - 1, k_up_up))
+            
+            c_up_z = tracer[k_up, j, i] if dz[k_up, j, i] > 1e-6 else c
+            c_up_up_z = tracer[k_up_up, j, i] if dz[k_up_up, j, i] > 1e-6 else c_up_z
+            
+            r_z = (c_up_z - c_up_up_z) / (c - c_up_z + 1e-10)
+            cfl_z = ti.abs(w_val) * dt / dz[k, j, i]
+            
+            flux_z = ti.abs(w_val) * (c - c_up_z) / dz[k, j, i]
+            corr_z = 0.5 * ti.abs(w_val) * (1.0 - cfl_z) * van_leer_limiter(r_z) * (c - c_up_z) / dz[k, j, i]
+            term_z = flux_z + corr_z
+                
+            # ==========================================
+            # Final Time Integration
+            # ==========================================
+            tracer_new[k, j, i] = ti.max(0.0, c - dt * (term_x + term_y + term_z))
+
+@ti.kernel
+def diffusion_implicit_vertical_ti(
+    tracer: ti.template(), kz: ti.template(), dz: ti.template(),
+    cp: ti.template(), dp: ti.template(), dt: ti.f32
+):
+    nz, ny, nx = tracer.shape
+    
+    # Massively parallelize across the horizontal domain
+    for j, i in ti.ndrange(ny, nx):
+        if dz[0, j, i] > 1e-6:
+            
+            # 1. Find the actual ocean bottom for this specific column
+            k_bot = 0
+            for k in range(nz):
+                if dz[k, j, i] > 1e-6:
+                    k_bot = k
+                    
+            if k_bot > 0:
+                # ==========================================
+                # FORWARD SWEEP (Top to Bottom)
+                # ==========================================
+                
+                # --- Surface Cell (k = 0) ---
+                dz_eff_bot = 0.5 * (dz[0, j, i] + dz[1, j, i])
+                k_eff_bot = 0.5 * (kz[0, j, i] + kz[1, j, i])
+                
+                # A_0 (upper diagonal) is 0 because there is no flux through the ocean surface
+                C_0 = -(dt / dz[0, j, i]) * (k_eff_bot / dz_eff_bot)
+                B_0 = 1.0 - C_0
+                
+                cp[0, j, i] = C_0 / B_0
+                dp[0, j, i] = tracer[0, j, i] / B_0
+                
+                # --- Interior Cells (k = 1 to k_bot - 1) ---
+                for k in range(1, k_bot):
+                    dz_eff_top = 0.5 * (dz[k-1, j, i] + dz[k, j, i])
+                    k_eff_top = 0.5 * (kz[k-1, j, i] + kz[k, j, i])
+                    
+                    dz_eff_bot = 0.5 * (dz[k, j, i] + dz[k+1, j, i])
+                    k_eff_bot = 0.5 * (kz[k, j, i] + kz[k+1, j, i])
+                    
+                    A_k = -(dt / dz[k, j, i]) * (k_eff_top / dz_eff_top)
+                    C_k = -(dt / dz[k, j, i]) * (k_eff_bot / dz_eff_bot)
+                    B_k = 1.0 - A_k - C_k
+                    
+                    denom = B_k - A_k * cp[k-1, j, i]
+                    cp[k, j, i] = C_k / denom
+                    dp[k, j, i] = (tracer[k, j, i] - A_k * dp[k-1, j, i]) / denom
+                    
+                # --- Bottom Cell (k = k_bot) ---
+                dz_eff_top = 0.5 * (dz[k_bot-1, j, i] + dz[k_bot, j, i])
+                k_eff_top = 0.5 * (kz[k_bot-1, j, i] + kz[k_bot, j, i])
+                
+                A_k = -(dt / dz[k_bot, j, i]) * (k_eff_top / dz_eff_top)
+                # C_k is 0 because there is no flux into the sea floor
+                B_k = 1.0 - A_k
+                
+                denom = B_k - A_k * cp[k_bot-1, j, i]
+                dp[k_bot, j, i] = (tracer[k_bot, j, i] - A_k * dp[k_bot-1, j, i]) / denom
+                
+                # ==========================================
+                # BACKWARD SUBSTITUTION (Bottom to Top)
+                # ==========================================
+                
+                # Set the bottom tracer value
+                tracer[k_bot, j, i] = dp[k_bot, j, i]
+                
+                # Work our way back up to the surface, solving the equations in-place
+                for step in range(1, k_bot + 1):
+                    k = k_bot - step
+                    tracer[k, j, i] = dp[k, j, i] - cp[k, j, i] * tracer[k+1, j, i]
 
 @ti.kernel
 def advection_neumann_ti(

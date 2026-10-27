@@ -3,6 +3,7 @@ import sys
 import glob
 import yaml
 import shutil
+import warnings
 import numpy as np
 import xarray as xr
 import taichi as ti
@@ -56,6 +57,29 @@ def run_simulation(cfg, config_file_path, run_name):
 
     print(f"Loading forcing data...")
 
+    # 1. Check which wind inputs have valid file paths
+    wind_defined = cfg.get('WIND', {}).get('FILE') is not None
+
+    wind_u_defined = cfg.get('WIND_U', {}).get('FILE') is not None
+    wind_v_defined = cfg.get('WIND_V', {}).get('FILE') is not None
+    wind_uv_defined = wind_u_defined and wind_v_defined
+
+    # 2. Check for missing U or V pairs
+    if wind_u_defined != wind_v_defined:
+        raise ValueError("Configuration Error: WIND_U and WIND_V must both be defined together.")
+
+    # 3. Throw an error if BOTH or NEITHER are defined
+    if wind_defined and wind_uv_defined:
+        raise ValueError(
+            "Configuration Error: Both WIND and WIND_U/WIND_V are defined. "
+            "Provide either the total wind magnitude OR the U/V components, not both."
+        )
+    elif not wind_defined and not wind_uv_defined:
+        warnings.warn(
+                "No wind forcing defined in configuration. Wind fields will default to zero, "
+                "resulting in zero air-sea gas flux for this simulation."
+            )
+
     # 1. Create an empty dictionary to store your loaded datasets
     # (Since you are looping, you can no longer do ds_t = ..., ds_s = ...)
     datasets = {}
@@ -72,7 +96,6 @@ def run_simulation(cfg, config_file_path, run_name):
             datasets[var_key] = None
             continue
         
-        file_path = f"input/{run_name}/{file_path}"
         print(f"Loading {var_key} from {file_path}...")
         datasets[var_key] = _load_local_var(file_path, internal_name)
   
@@ -80,14 +103,14 @@ def run_simulation(cfg, config_file_path, run_name):
 #        if cfg.get('RESAMPLE_ATMOS_DAILY', False):
 #            ds_sw = ds_sw.resample(time="1D").mean()
 #            ds_wind = ds_wind.resample(time="1D").mean()
-        
+
         # If U- and V-component of wind data are provided, calculate the magnitude
         if datasets.get("WIND_U") is not None and datasets.get("WIND_V") is not None:            
             datasets["WIND"] = np.sqrt(datasets["WIND_U"]**2 + datasets["WIND_V"]**2)
 
     # BGC Inputs
-    ds_clim = xr.open_dataset(f"input/{run_name}/{cfg['CLIM_FILE']}") if cfg['CLIM_FILE'] else None
-    ds_restart = xr.open_dataset(f"output/{run_name}/{cfg['RESTART_FILE']}").squeeze() if cfg['RESTART_FILE'] else None
+    ds_clim = xr.open_dataset(cfg['CLIM_FILE']) if cfg['CLIM_FILE'] else None
+    ds_restart = xr.open_dataset(cfg['RESTART_FILE']).squeeze() if cfg['RESTART_FILE'] else None
 
     save_flags = {key: val.get('SAVE', False) for key, val in cfg['FORCING'].items()}
 

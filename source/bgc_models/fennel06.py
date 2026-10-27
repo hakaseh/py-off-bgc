@@ -1,238 +1,194 @@
-import jax
-import jax.numpy as jnp
+import taichi as ti
+import numpy as np
 from dataclasses import dataclass
 from .base import BaseBGCModel
-from .utils import calculate_par
+from .utils import calculate_par_ti, apply_sinking_ti
 
-@jax.jit
-def fennel_kernel_jax(nitrate, 
-                      ammonium, 
-                      phy, 
-                      chl, 
-                      zoo, 
-                      sdet, 
-                      ldet, 
-                      oxygen,
-                      temp, 
-                      par, 
-                      dz, 
-                      dt,
-                      # Parameters
-                      p_i_thnh4, 
-                      p_d_p5nh4, 
-                      p_nitrir, 
-                      p_k_no3, 
-                      p_k_nh4, 
-                      p_vp0,
-                      p_k_phy, 
-                      p_phycn, 
-                      p_phyis, 
-                      p_phymr, 
-                      p_chl2c_m, 
-                      p_zooae_n,
-                      p_zoobm, 
-                      p_zooer, 
-                      p_zoogr, 
-                      p_zoomr, 
-                      p_zoocn, 
-                      p_lderrn,
-                      p_sderrn, 
-                      p_coagr, 
-                      p_wp, 
-                      p_ws, 
-                      p_wl
-                     ):
-    
+@ti.kernel
+def fennel_kernel_ti(
+    nitrate: ti.types.ndarray(), ammonium: ti.types.ndarray(), 
+    phy: ti.types.ndarray(), chl: ti.types.ndarray(), 
+    zoo: ti.types.ndarray(), sdet: ti.types.ndarray(), 
+    ldet: ti.types.ndarray(), oxygen: ti.types.ndarray(),
+    temp: ti.types.ndarray(), par: ti.types.ndarray(), 
+    dz: ti.types.ndarray(), dt: ti.f32, p: ti.types.ndarray()
+):
     dt_day = dt / 86400.0
     eps = 1e-12
+    nz, ny, nx = nitrate.shape
 
-    # --- D. SOURCES / SINKS ---
-    
-    # chl-to-carbon ratio
-    cff = p_phycn * 12.0
-    chl2c = jnp.minimum(chl / (phy * cff + eps), p_chl2c_m)
+    # --- A. Unpack Parameters ---
+    p_i_thnh4 = p[0]; p_d_p5nh4 = p[1]; p_nitrir = p[2]
+    p_k_no3 = p[3]; p_k_nh4 = p[4]; p_vp0 = p[5]
+    p_k_phy = p[6]; p_phycn = p[7]; p_phyis = p[8]
+    p_phymr = p[9]; p_chl2c_m = p[10]; p_zooae_n = p[11]
+    p_zoobm = p[12]; p_zooer = p[13]; p_zoogr = p[14]
+    p_zoomr = p[15]; p_zoocn = p[16]; p_lderrn = p[17]
+    p_sderrn = p[18]; p_coagr = p[19]
 
-    # temperature- and light-limited growth rate (Eppley 1972)
-    vp = p_vp0 * 0.59 * (1.066 ** temp)
-    fac1_light = par * p_phyis
-    epp = vp / jnp.sqrt(vp * vp + fac1_light * fac1_light)
-    t_ppmax = epp * fac1_light
+    # --- B. GPU Multi-Threading Loop ---
+    for k, j, i in ti.ndrange(nz, ny, nx):
+        if dz[k, j, i] > 1e-6:
+            
+            # Read current values
+            c_n = nitrate[k, j, i]; c_a = ammonium[k, j, i]
+            c_p = phy[k, j, i]; c_c = chl[k, j, i]
+            c_z = zoo[k, j, i]; c_sd = sdet[k, j, i]
+            c_ld = ldet[k, j, i]; c_ox = oxygen[k, j, i]
+            
+            t = temp[k, j, i]; irrad = par[k, j, i]
 
-    # nutrient-limitation (Parker 1993)
-    cff1_nut = ammonium * p_k_nh4
-    cff2_nut = nitrate * p_k_no3
-    inhnh4 = 1.0 / (1.0 + cff1_nut)
-    l_nh4 = cff1_nut / (1.0 + cff1_nut)
-    l_no3 = cff2_nut * inhnh4 / (1.0 + cff2_nut)
-    ltot = l_no3 + l_nh4
+            # --- C. SOURCES / SINKS ---
+            
+            # chl-to-carbon ratio
+            cff = p_phycn * 12.0
+            chl2c = ti.min(c_c / (c_p * cff + eps), p_chl2c_m)
 
-    # nitrate and ammonium uptake by phytoplankton
-    cff4_up = t_ppmax * p_k_no3 * inhnh4 / (1.0 + cff2_nut) * phy
-    cff5_up = t_ppmax * p_k_nh4 / (1.0 + cff1_nut) * phy
+            # temperature- and light-limited growth rate (Eppley 1972)
+            vp = p_vp0 * 0.59 * (1.066 ** t)
+            fac1_light = irrad * p_phyis
+            epp = vp / ti.sqrt(vp * vp + fac1_light * fac1_light)
+            t_ppmax = epp * fac1_light
 
-    n_newprod = nitrate * cff4_up
-    n_regprod = ammonium * cff5_up
+            # nutrient-limitation (Parker 1993)
+            cff1_nut = c_a * p_k_nh4
+            cff2_nut = c_n * p_k_no3
+            inhnh4 = 1.0 / (1.0 + cff1_nut)
+            l_nh4 = cff1_nut / (1.0 + cff1_nut)
+            l_no3 = cff2_nut * inhnh4 / (1.0 + cff2_nut)
+            ltot = l_no3 + l_nh4
 
-    chl_prod = (t_ppmax * t_ppmax * ltot * ltot * p_chl2c_m * chl) / (p_phyis * jnp.maximum(chl2c, eps) * par + eps)
+            # nitrate and ammonium uptake by phytoplankton
+            cff4_up = t_ppmax * p_k_no3 * inhnh4 / (1.0 + cff2_nut) * c_p
+            cff5_up = t_ppmax * p_k_nh4 / (1.0 + cff1_nut) * c_p
 
-    # nitrification (nh4 --> no3, Olson 1981)
-    fac2_o2 = jnp.maximum(oxygen, 0.0)
-    fac3_o2 = jnp.maximum(fac2_o2 / (3.0 + fac2_o2), 0.0)
-    fac1_nit = p_nitrir * fac3_o2
+            n_newprod = c_n * cff4_up
+            n_regprod = c_a * cff5_up
 
-    cff1_nit = (par - p_i_thnh4) / (p_d_p5nh4 + par - 2.0 * p_i_thnh4)
-    cff2_nit = 1.0 - jnp.maximum(cff1_nit, 0.0)
-    cff3_nit = fac1_nit * cff2_nit
-    n_nitrifi = ammonium * cff3_nit
+            chl_prod = (t_ppmax * t_ppmax * ltot * ltot * p_chl2c_m * c_c) / (p_phyis * ti.max(chl2c, eps) * irrad + eps)
 
-    # if no light, no phyto growth and nitrification occurs at max rate
-    no_light = par == 0.0
-    n_newprod = jnp.where(no_light, 0.0, n_newprod)
-    n_regprod = jnp.where(no_light, 0.0, n_regprod)
-    chl_prod = jnp.where(no_light, 0.0, chl_prod)
+            # nitrification (nh4 --> no3, Olson 1981)
+            fac2_o2 = ti.max(c_ox, 0.0)
+            fac3_o2 = ti.max(fac2_o2 / (3.0 + fac2_o2), 0.0)
+            fac1_nit = p_nitrir * fac3_o2
 
-    # zooplankton grazing (Landry 1993)
-    cff1_graz = p_zoogr * zoo * phy / (p_k_phy + phy * phy)
-    n_graz = cff1_graz * phy
-    chl_graz = cff1_graz * chl
+            cff1_nit = (irrad - p_i_thnh4) / (p_d_p5nh4 + irrad - 2.0 * p_i_thnh4)
+            cff2_nit = 1.0 - ti.max(cff1_nit, 0.0)
+            cff3_nit = fac1_nit * cff2_nit
+            n_nitrifi = c_a * cff3_nit
 
-    n_assim = cff1_graz * phy * p_zooae_n
-    n_egest = cff1_graz * phy * (1.0 - p_zooae_n)
+            # if no light, no phyto growth and nitrification occurs at max rate
+            if irrad == 0.0:
+                n_newprod = 0.0
+                n_regprod = 0.0
+                chl_prod = 0.0
 
-    # phyto mortality
-    n_pmortal = p_phymr * jnp.maximum(phy - 1e-6, 0.0)
-    chl_pmortal = p_phymr * jnp.maximum(chl - 1e-6, 0.0)
+            # zooplankton grazing (Landry 1993)
+            cff1_graz = p_zoogr * c_z * c_p / (p_k_phy + c_p * c_p)
+            n_graz = cff1_graz * c_p
+            chl_graz = cff1_graz * c_c
 
-    # zoo loss terms
-    fac1_z = p_zooer * phy * phy / (p_k_phy + phy * phy)
-    n_zmortal = p_zoomr * zoo * zoo
-    n_zexcret = (fac1_z * p_zooae_n) * zoo
-    n_zmetabo = p_zoobm * jnp.maximum(zoo - 1e-6, 0.0)
+            n_assim = cff1_graz * c_p * p_zooae_n
+            n_egest = cff1_graz * c_p * (1.0 - p_zooae_n)
 
-    # coagulation of phy and sdet to ldet
-    cff1_coag = p_coagr * (sdet + phy)
-    n_coagp = phy * cff1_coag
-    chl_coag = chl * cff1_coag
-    n_coagd = sdet * cff1_coag
+            # phyto mortality
+            n_pmortal = p_phymr * ti.max(c_p - 1e-6, 0.0)
+            chl_pmortal = p_phymr * ti.max(c_c - 1e-6, 0.0)
 
-    # remineralization
-    fac1_rem = jnp.maximum(oxygen - 6.0, 0.0)
-    fac2_rem = jnp.maximum(fac1_rem / (3.0 + fac1_rem), 0.0)
-    n_remines = sdet * (p_sderrn * fac2_rem)
-    n_reminel = ldet * (p_lderrn * fac2_rem)
+            # zoo loss terms
+            fac1_z = p_zooer * c_p * c_p / (p_k_phy + c_p * c_p)
+            n_zmortal = p_zoomr * c_z * c_z
+            n_zexcret = (fac1_z * p_zooae_n) * c_z
+            n_zmetabo = p_zoobm * ti.max(c_z - 1e-6, 0.0)
 
-    # --- E. DERIVATIVES ---
-    d_nitrate = -n_newprod + n_nitrifi
-    d_ammonium = -n_regprod - n_nitrifi + n_zmetabo + n_zexcret + n_remines + n_reminel
-    d_phy = n_newprod + n_regprod - n_graz - n_pmortal - n_coagp
-    d_chl = chl_prod - chl_graz - chl_pmortal - chl_coag
-    d_zoo = n_assim - n_zmortal - n_zexcret - n_zmetabo
-    d_sdet = n_egest + n_pmortal + n_zmortal - n_coagd - n_remines
-    d_ldet = n_coagp + n_coagd - n_reminel
-    d_oxygen = n_newprod * 8.625 + n_regprod * 6.625 - 2.0 * n_nitrifi - 6.625 * (n_zmetabo + n_zexcret + n_remines + n_reminel)
+            # coagulation of phy and sdet to ldet
+            cff1_coag = p_coagr * (c_sd + c_p)
+            n_coagp = c_p * cff1_coag
+            chl_coag = c_c * cff1_coag
+            n_coagd = c_sd * cff1_coag
 
-    # --- F. UPDATE ---
-    # Apply geometric mask globally to filter out land/empty cells
-    water_mask = dz > 1e-6
+            # remineralization
+            fac1_rem = ti.max(c_ox - 6.0, 0.0)
+            fac2_rem = ti.max(fac1_rem / (3.0 + fac1_rem), 0.0)
+            n_remines = c_sd * (p_sderrn * fac2_rem)
+            n_reminel = c_ld * (p_lderrn * fac2_rem)
 
-    return (
-        jnp.where(water_mask, nitrate + d_nitrate * dt_day, nitrate),
-        jnp.where(water_mask, ammonium + d_ammonium * dt_day, ammonium),
-        jnp.where(water_mask, phy + d_phy * dt_day, phy),
-        jnp.where(water_mask, chl + d_chl * dt_day, chl),
-        jnp.where(water_mask, zoo + d_zoo * dt_day, zoo),
-        jnp.where(water_mask, sdet + d_sdet * dt_day, sdet),
-        jnp.where(water_mask, ldet + d_ldet * dt_day, ldet),
-        jnp.where(water_mask, oxygen + d_oxygen * dt_day, oxygen)
-    )
+            # --- D. DERIVATIVES ---
+            d_nitrate = -n_newprod + n_nitrifi
+            d_ammonium = -n_regprod - n_nitrifi + n_zmetabo + n_zexcret + n_remines + n_reminel
+            d_phy = n_newprod + n_regprod - n_graz - n_pmortal - n_coagp
+            d_chl = chl_prod - chl_graz - chl_pmortal - chl_coag
+            d_zoo = n_assim - n_zmortal - n_zexcret - n_zmetabo
+            d_sdet = n_egest + n_pmortal + n_zmortal - n_coagd - n_remines
+            d_ldet = n_coagp + n_coagd - n_reminel
+            d_oxygen = n_newprod * 8.625 + n_regprod * 6.625 - 2.0 * n_nitrifi - 6.625 * (n_zmetabo + n_zexcret + n_remines + n_reminel)
+
+            # --- E. UPDATE IN-PLACE ---
+            nitrate[k, j, i] = ti.max(0.0, c_n + d_nitrate * dt_day)
+            ammonium[k, j, i] = ti.max(0.0, c_a + d_ammonium * dt_day)
+            phy[k, j, i] = ti.max(0.0, c_p + d_phy * dt_day)
+            chl[k, j, i] = ti.max(0.0, c_c + d_chl * dt_day)
+            zoo[k, j, i] = ti.max(0.0, c_z + d_zoo * dt_day)
+            sdet[k, j, i] = ti.max(0.0, c_sd + d_sdet * dt_day)
+            ldet[k, j, i] = ti.max(0.0, c_ld + d_ldet * dt_day)
+            oxygen[k, j, i] = ti.max(0.0, c_ox + d_oxygen * dt_day)
+
 
 class Model_FENNEL06(BaseBGCModel):
     def __init__(self, nz, ny, nx, water_mask, params=None):
         super().__init__(nz, ny, nx, water_mask)
         
-        # 1. Setup Tracers
-        self.names = ['nitrate', 
-                      'ammonium', 
-                      'phy', 
-                      'chl', 
-                      'zoo', 
-                      'sdet', 
-                      'ldet', 
-                      'oxygen'
-                     ]
+        self.names = ['nitrate', 'ammonium', 'phy', 'chl', 'zoo', 'sdet', 'ldet', 'oxygen']
         
-        # Swapped to jnp.zeros!
-        self.tracers = {n: jnp.zeros((nz, ny, nx)) for n in self.names}
+        # Keep tracers as NumPy arrays for I/O. Taichi will zero-copy access them.
+        self.tracers = {n: np.zeros((nz, ny, nx), dtype=np.float32) for n in self.names}
+        self.par_3d = np.zeros((nz, ny, nx), dtype=np.float32)
         
-        # 2. Handle Parameters
-        if params is None:
-            self.params = Params_BGC()
-        else:
-            self.params = params
+        self.params = params if params is not None else Params_BGC()
+        
+        # Pack the parameters into a fast, 1D NumPy array for the GPU
+        param_order = [
+            'p_i_thnh4', 'p_d_p5nh4', 'p_nitrir', 'p_k_no3', 'p_k_nh4', 'p_vp0',
+            'p_k_phy', 'p_phycn', 'p_phyis', 'p_phymr', 'p_chl2c_m', 'p_zooae_n',
+            'p_zoobm', 'p_zooer', 'p_zoogr', 'p_zoomr', 'p_zoocn', 'p_lderrn',
+            'p_sderrn', 'p_coagr', 'p_wp', 'p_ws', 'p_wl'
+        ]
+        self.param_arr = np.array([getattr(self.params, name) for name in param_order], dtype=np.float32)
 
-        # 3. Configure Sinking
-        self.sinking_config = {'phy': self.params.p_wp,
-                               'sdet': self.params.p_ws,
-                               'ldet': self.params.p_wl
-                              }
+        self.sinking_config = {
+            'phy': self.params.p_wp,
+            'sdet': self.params.p_ws,
+            'ldet': self.params.p_wl
+        }
 
     def biology_step(self, t_curr, sw_curr, dz, dt):
-        """Step biology forward."""
-        # 1. Calc Shared PAR
-        psum = self.tracers['chl']
-        par_3d = calculate_par(sw_curr, psum, dz)
-
-        # 2. Unpack Params
-        p = self.params
+        """Step biology forward directly on the GPU."""
         
-        # 3. Call the JAX Kernel
-        outputs = fennel_kernel_jax(
-            # State variables
-            self.tracers['nitrate'], 
-            self.tracers['ammonium'], 
-            self.tracers['phy'], 
-            self.tracers['chl'], 
-            self.tracers['zoo'],
-            self.tracers['sdet'],
-            self.tracers['ldet'],
-            self.tracers['oxygen'],
-            # Ancillary variables 
-            t_curr, 
-            par_3d, 
-            dz, 
-            dt,
-            # Parameters (Explicitly passed)
-            p.p_i_thnh4, 
-            p.p_d_p5nh4, 
-            p.p_nitrir, 
-            p.p_k_no3, 
-            p.p_k_nh4, 
-            p.p_vp0,
-            p.p_k_phy, 
-            p.p_phycn, 
-            p.p_phyis, 
-            p.p_phymr, 
-            p.p_chl2c_m, 
-            p.p_zooae_n,
-            p.p_zoobm, 
-            p.p_zooer, 
-            p.p_zoogr, 
-            p.p_zoomr, 
-            p.p_zoocn, 
-            p.p_lderrn,
-            p.p_sderrn, 
-            p.p_coagr, 
-            p.p_wp, 
-            p.p_ws, 
-            p.p_wl
-         )
-         
-        # 4. Dictionary unpacking (Safe for JAX immutability)
-        tracer_keys = ['nitrate', 'ammonium', 'phy', 'chl', 'zoo', 'sdet', 'ldet', 'oxygen']
-        for key, jax_array in zip(tracer_keys, outputs):
-            self.tracers[key] = jax_array
-            
-        return par_3d
+        # 1. Calc Shared PAR (In-place update of self.par_3d)
+        psum = self.tracers['chl']
+        self.par_3d.fill(0.0)
+        calculate_par_ti(sw_curr.astype(np.float32), psum, dz.astype(np.float32), self.par_3d)
+
+        # 2. Call the Taichi GPU Kernel 
+        fennel_kernel_ti(
+            self.tracers['nitrate'], self.tracers['ammonium'], 
+            self.tracers['phy'], self.tracers['chl'], 
+            self.tracers['zoo'], self.tracers['sdet'], 
+            self.tracers['ldet'], self.tracers['oxygen'],
+            t_curr.astype(np.float32), self.par_3d, dz.astype(np.float32), 
+            float(dt), self.param_arr
+        )
+        
+        return self.par_3d
+
+    def sinking_step(self, dz, dt):
+        """Step particulate sinking forward."""
+        dz_safe_min = np.where(dz > 1e-6, dz, 1e6)
+        min_dz = float(np.min(dz_safe_min))
+        
+        for var, w_sink in self.sinking_config.items():
+            if w_sink > 0.0:
+                apply_sinking_ti(self.tracers[var], dz.astype(np.float32), float(dt), float(w_sink), min_dz)
 
 
 @dataclass
