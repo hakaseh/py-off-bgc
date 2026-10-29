@@ -36,14 +36,14 @@ def _load_local_var(filepath, varname):
 def run_simulation(cfg, config_file_path, run_name):
     # Initialize Taichi (Allows config to toggle GPU/CPU)
     if cfg.get('USE_GPU', False) == True:
-        ti.init(arch=ti.metal, default_fp=ti.f32)
+        ti.init(arch=ti.metal, default_fp=ti.f32, fast_math=True)
     else:
         if not cfg['MAX_THREADS']:
             # YAML did not provide it, so we leave the argument out entirely
-            ti.init(arch=ti.cpu, default_fp=ti.f32)
+            ti.init(arch=ti.cpu, default_fp=ti.f32, fast_math=True)
         else:
             # YAML provided a number, so we pass the argument
-            ti.init(arch=ti.cpu, default_fp=ti.f32, cpu_max_num_threads=cfg['CPU_THREADS'])
+            ti.init(arch=ti.cpu, default_fp=ti.f32, fast_math=True, cpu_max_num_threads=cfg['CPU_THREADS'])
 
     lon0, lon1 = cfg['LON_BOUNDS']
     lat0, lat1 = cfg['LAT_BOUNDS']
@@ -58,10 +58,13 @@ def run_simulation(cfg, config_file_path, run_name):
     print(f"Loading forcing data...")
 
     # 1. Check which wind inputs have valid file paths
-    wind_defined = cfg.get('WIND', {}).get('FILE') is not None
-
-    wind_u_defined = cfg.get('WIND_U', {}).get('FILE') is not None
-    wind_v_defined = cfg.get('WIND_V', {}).get('FILE') is not None
+    # Extract the FORCING dictionary first
+    forcing_cfg = cfg.get('FORCING', {})
+    
+    # Check the nested keys
+    wind_defined = forcing_cfg.get('WIND', {}).get('FILE') is not None
+    wind_u_defined = forcing_cfg.get('WIND_U', {}).get('FILE') is not None
+    wind_v_defined = forcing_cfg.get('WIND_V', {}).get('FILE') is not None
     wind_uv_defined = wind_u_defined and wind_v_defined
 
     # 2. Check for missing U or V pairs

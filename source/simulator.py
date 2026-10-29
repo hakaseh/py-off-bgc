@@ -40,12 +40,24 @@ class OfflineSimulator:
     def prepare_forcing(self, lat_range, lon_range, depth_range, time_range, 
                         ds_forcing, ds_clim=None, ds_restart=None):
         print("Preparing and subsetting forcing datasets...")
-        
+
+        # --- Standardize raw coordinates before slicing to prevent size-0 arrays ---
+        for key in ["T", "S", "U", "V"]:
+            if ds_forcing[key] is not None:
+                # 1. Force depth to be positive
+                if "depth" in ds_forcing[key].coords:
+                    ds_forcing[key] = ds_forcing[key].assign_coords(depth=abs(ds_forcing[key]["depth"]))
+                
+                # 2. Sort coordinates so slice(min, max) never returns an empty array
+                sort_dims = [d for d in ["lon", "lat", "depth", "time"] if d in ds_forcing[key].dims]
+                ds_forcing[key] = ds_forcing[key].sortby(sort_dims)
+
         self.ds_t = ds_forcing["T"].sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
         self.ds_s = ds_forcing["S"].sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
         self.ds_u = ds_forcing["U"].sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
         self.ds_v = ds_forcing["V"].sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
         self.ds_sw = ds_forcing["SW"].sel(time=time_range, lat=lat_range, lon=lon_range)
+
 
         if ds_forcing["K"] is None:
             self.ds_k = None
@@ -58,7 +70,7 @@ class OfflineSimulator:
             self.ds_wind = ds_forcing["WIND"].sel(time=time_range, lat=lat_range, lon=lon_range)
 
         if ds_forcing["ICE"] is None:
-            self.ds_ice = xr.ones_like(self.ds_sw)
+            self.ds_ice = xr.zeros_like(self.ds_sw)
         else:
             self.ds_ice = ds_forcing["ICE"].sel(time=time_range, lat=lat_range, lon=lon_range)
 
@@ -137,6 +149,7 @@ class OfflineSimulator:
             self.lon_2d, self.lat_2d = np.meshgrid(self.ds_t['lon'].values, self.ds_t['lat'].values)
             
         self.nz, self.ny, self.nx = self.ds_t.depth.size, self.ds_t.lat.size, self.ds_t.lon.size
+        # abs() because depth values in jcope2m are negatives
         dz_1d = physics.calculate_dz_from_centers(self.ds_t['depth'].values)
         self.dz_3d = np.tile(dz_1d[:, None, None], (1, self.ny, self.nx))
         self.p_3d = self.ds_t['depth'].values[:, None, None]

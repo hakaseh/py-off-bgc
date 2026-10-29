@@ -1,0 +1,67 @@
+# Variables used in all programs
+LON_BOUNDS: [117, 180]
+LAT_BOUNDS: [17, 60]
+DEPTH_BOUNDS: [null, 1000]
+DATE_BOUNDS: ["19930101", "19930131"]
+
+# Variables used in prep.py
+OCEAN_SOURCE: null
+ATMOS_SOURCE: "cds_era5"
+REF_OCEAN: "input/JCOPE2M/best_estimate/T_19930101.nc"
+VAR_OCEAN: "TT"
+GLODAP_DIR: "climatology/GLODAPv2.2016b_MappedClimatologies"
+
+# Variables used in run.py
+BGC_MODEL: "NEMURO"
+DT_SEC: 900.0
+USE_GPU: false
+MAX_THREADS: null
+
+FORCING:
+  T:
+    FILE: "input/JCOPE2M/best_estimate/T_199301*.nc"
+    NAME: "TT"
+    SAVE: true
+  S:
+    FILE: "input/JCOPE2M/best_estimate/S_199301*.nc"
+    NAME: "ST"
+    SAVE: false
+  U:
+    FILE: "input/JCOPE2M/best_estimate/UI_199301*.nc"
+    NAME: "UI"
+    SAVE: false
+  V:
+    FILE: "input/JCOPE2M/best_estimate/VI_199301*.nc"
+    NAME: "VI"
+    SAVE: false
+  SW:
+    FILE: "input/jcope2m/cds_era5_solar_1993*.nc"
+    NAME: "avg_sdswrf"
+    SAVE: true
+  WIND:
+    FILE: null
+    NAME: null
+    SAVE: false
+  WIND_U:
+    FILE: "input/jcope2m/cds_era5_wind_1993*.nc"
+    NAME: "u10"
+  WIND_V:
+    FILE: "input/jcope2m/cds_era5_wind_1993*.nc"
+    NAME: "v10"
+  ICE:
+    FILE: null
+    NAME: "siconc_mean"
+    SAVE: false
+  K:
+    FILE: null
+    NAME: null
+    SAVE: true
+
+SPONGE_WIDTH: 1
+TAU_LATERAL: 86400.0
+TAU_BOTTOM: 2592000.0
+TAU_COAST: 86400.0
+IS_GLOBAL: false
+
+RESTART_FILE: null
+CLIM_FILE: "input/jcope2m/bgc_climatology_jcope2m.nc"
