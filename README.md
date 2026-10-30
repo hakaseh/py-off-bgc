@@ -2,6 +2,15 @@
 
 ## 🚀 Getting Started
 
+### 🖥️ Quick Visualization (Optional)
+To quickly visualize the NetCDF outputs from the terminal, this project uses `ncvue`. Because it requires Python's graphical interface (`tkinter`), you may need to install the system bindings before it will launch:
+
+* **macOS (Homebrew):** `brew install python-tk@3.12` *(match to your Python version)*
+* **Ubuntu/Debian:** `sudo apt-get install python3-tk`
+* **Windows:** No action needed (Tkinter is included in the official Windows Python installer).
+
+Once installed, simply run: `ncvue filename.nc`
+
 * py-off-bgc requires that the version of your Python is compatible with Taichi. Check the Python version associated with the latest release of Taichi from [here](https://pypi.org/project/taichi/#files) and make sure to use that version of below for the installation of py-off-bgc.
 
 * Install py-off-bgc
@@ -42,7 +51,10 @@ copernicusmarine login
 
 * Download GLODAPv2.2016b from [here](https://glodap.info/index.php/mapped-data-product/#:~:text=Mapped%20Data%20Product%20files). Unzip the zip file and place the unzipped directory in `py-off-bgc/climatology/`.
 
+
+
 ## Demo (an example test case)
+If you want to learn how `py-off-bgc` works, follow the following steps. In this example, we use the NEMURO biogeochemical model in around Hokkaido driven by the Copernicus GOEPR reanalysis product.
 
 ```
 python prep.py config/hokkaido2024.yaml
@@ -51,8 +63,6 @@ python prep.py config/hokkaido2024.yaml
 ```
 python run.py config/hokkaido.yaml
 ```
-
-* GOEPR-ERA5-Hokkaido
 
 
 ## Run files (to be moved to run/README.md)

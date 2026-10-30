@@ -21,3 +21,4 @@ dependencies:
   - cdsapi
   - ipykernel
   - matplotlib
+  - ncvue

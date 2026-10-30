@@ -111,8 +111,8 @@ def run_simulation(cfg, config_file_path, run_name):
         if datasets.get("WIND_U") is not None and datasets.get("WIND_V") is not None:            
             datasets["WIND"] = np.sqrt(datasets["WIND_U"]**2 + datasets["WIND_V"]**2)
 
-    # BGC Inputs
-    ds_clim = xr.open_dataset(cfg['CLIM_FILE']) if cfg['CLIM_FILE'] else None
+    # BGC Inputs (remove time dimension via suqeeze())
+    ds_clim = xr.open_dataset(cfg['CLIM_FILE']).squeeze() if cfg['CLIM_FILE'] else None
     ds_restart = xr.open_dataset(cfg['RESTART_FILE']).squeeze() if cfg['RESTART_FILE'] else None
 
     save_flags = {key: val.get('SAVE', False) for key, val in cfg['FORCING'].items()}

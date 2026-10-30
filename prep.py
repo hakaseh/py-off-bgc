@@ -37,6 +37,9 @@ def download_input(cfg, run_name):
             id_data = "cmems_mod_glo_phy-mnstd_my_0.25deg_P1D-m"
             list_3d = ["thetao_mean", "so_mean", "uo_mean", "vo_mean"]
             list_2d = ["siconc_mean"]
+        else:
+            sys.exit(f"❌ ERROR: OCEAN_SOURCE: {cfg["OCEAN_SOURCE"
+                ]} is not supported. See config/README.md for the list of supported sources.")
      
         # Loop over the 3D variables
         for i in range(len(list_3d)):
@@ -190,6 +193,13 @@ def generate_climatology(cfg, run_name):
         # Generate the climatology
         ds_clim = generate_restoring_climatology(ds_ref, glodap_dir)
         
+        # Before saving, force 'time' to be a 1D dimension of length 1 
+        # instead of a 0D scalar so that visualization tools don't crash.
+        ds_clim = ds_clim.expand_dims('time')
+
+        # Cast all variables from double (float64) to single (float32) precision
+        ds_clim = ds_clim.astype("float32")
+
         # Save it to the input directory
         ds_clim.to_netcdf(clim_out_path)
         print(f"Saved static climatology to: {clim_out_path}")    
