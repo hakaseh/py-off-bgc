@@ -4,6 +4,8 @@ import xarray as xr
 import pandas as pd
 import os
 import gsw
+import psutil
+import sys
 from . import physics
 from . import bgc_models
 from .bgc_models.utils import GLODAP_MAP
@@ -92,12 +94,20 @@ class OfflineSimulator:
             self.ds_v.nbytes + self.ds_sw.nbytes + self.ds_wind.nbytes + self.ds_ice.nbytes
         )
         total_gb = total_bytes / (1024 ** 3)
-        print(f"  -> MEMORY CHECK: Total RAM required is ~{total_gb:.2f} GB")
-        
-        # Prevent Mac from crashing (Adjust the 12.0 GB limit based on your machine!)
-        if total_gb > 12.0:
-            print("  -> [ERROR] Dataset is too massive! Reduce DATE_BOUNDS or spatial bounds in config.yml.")
-            exit()
+
+        # psutil.virtual_memory() works identically on Mac, Linux, and Windows
+        mem = psutil.virtual_memory()
+        system_ram_gb = mem.total / (1024 ** 3)
+        available_ram_gb = mem.available / (1024 ** 3)
+
+        print(f"  -> MEMORY CHECK: Dataset requires ~{total_gb:.2f} GB")
+        print(f"  -> SYSTEM RAM: {system_ram_gb:.1f} GB (Available: {available_ram_gb:.1f} GB)")
+
+        # Set the limit to whichever is smaller: 75% of total RAM, or currently available RAM minus 2GB
+        safe_limit_gb = min(system_ram_gb * 0.75, available_ram_gb - 2.0)
+
+        if total_gb > safe_limit_gb:
+            sys.exit(f"  -> [ERROR] Not enough memory! Requires {total_gb:.2f} GB, but safe limit is {safe_limit_gb:.2f} GB.")
 
         # 2. Load with progress tracking
         print("  -> Loading T...")

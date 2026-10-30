@@ -17,3 +17,4 @@ cdsapi
 ipykernel
 matplotlib
 ncvue
+psutil
