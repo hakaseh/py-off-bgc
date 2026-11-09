@@ -1,6 +1,7 @@
 import numpy as np
 import taichi as ti
 import math
+import xarray as xr
 
 # ==========================================
 # 1. SETUP FUNCTIONS (Pure NumPy - Runs Once)
@@ -8,33 +9,53 @@ import math
 
 def generate_static_grid(ds_template):
     R_EARTH = 6371000.0
+    
+    # 1. Calculate 1D differences and pad the last value
     dlon_vals = np.abs(np.diff(ds_template['lon'].values))
     dlon_vals = np.append(dlon_vals, dlon_vals[-1])
+    
     dlat_vals = np.abs(np.diff(ds_template['lat'].values))
     dlat_vals = np.append(dlat_vals, dlat_vals[-1])
     
-    dlon_rad = np.radians(dlon_vals)[:, None] * np.ones((len(dlat_vals), len(dlon_vals)))
-    dlat_rad = np.radians(dlat_vals)[:, None] * np.ones((len(dlat_vals), len(dlon_vals)))
-    lat_rad = np.radians(ds_template['lat'].values)[:, None] * np.ones((len(dlat_vals), len(dlon_vals)))
+    lat_vals = ds_template['lat'].values
     
+    # 2. Use meshgrid to generate full 2D grids for math
+    # indexing='ij' ensures the output shape is strictly (lat, lon)
+    dlat_2d, dlon_2d = np.meshgrid(dlat_vals, dlon_vals, indexing='ij')
+    lat_2d, _ = np.meshgrid(lat_vals, dlon_vals, indexing='ij')
+    
+    # 3. Convert all 2D grids to radians
+    dlon_rad = np.radians(dlon_2d)
+    dlat_rad = np.radians(dlat_2d)
+    lat_rad = np.radians(lat_2d)
+    
+    # 4. Calculate 2D Area directly (no manual broadcasting needed!)
     area = (R_EARTH**2) * dlat_rad * dlon_rad * np.cos(lat_rad)
     
-    import xarray as xr
+    # 5. Build the Xarray Dataset
     ds_grid = xr.Dataset(
         data_vars={'area': (['lat', 'lon'], area)},
         coords=ds_template.coords
     )
     
+    # 6. Handle Depth / Volume if present
     if 'depth' in ds_template.coords:
         ddep_vals = np.abs(np.diff(ds_template['depth'].values))
         ddep_vals = np.append(ddep_vals, ddep_vals[-1])
+        
         ds_grid['dz'] = (['depth'], ddep_vals)
+        
+        # Note: We still use basic numpy broadcasting for the 3D volume step.
+        # Generating a full 3D meshgrid would waste a massive amount of RAM,
+        # and simple 1D depth * 2D area broadcasting is standard and safe here.
         volume = area[None, :, :] * ddep_vals[:, None, None]
+        
         ds_grid['volume'] = (['depth', 'lat', 'lon'], volume)
         ds_grid['dz'].attrs = {'units': 'm'}
         ds_grid['volume'].attrs = {'units': 'm3'}
         
     ds_grid['area'].attrs = {'units': 'm2'}
+    
     return ds_grid
 
 def haversine_dist(lon1, lat1, lon2, lat2):

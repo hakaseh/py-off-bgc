@@ -8,6 +8,7 @@ import cdsapi
 import pandas as pd
 import io
 import requests
+from source.utils import dims_ds,slice_ds
 from source.climatology import generate_restoring_climatology
 
 # Main program
@@ -21,7 +22,18 @@ def download_input(cfg, run_name):
     lat0, lat1 = cfg['LAT_BOUNDS']
     dep0, dep1 = cfg['DEPTH_BOUNDS']
     date0, date1 = cfg['DATE_BOUNDS']
-    
+
+    if lon0 >= lon1:
+        sys.exit(f"❌ ERROR: {cfg['LON_BOUNDS']} is not in an increasing order.")
+    elif lat0 >= lat1:
+        sys.exit(f"❌ ERROR: {cfg['LAT_BOUNDS']} is not in an increasing order.")
+    elif dep0 >= dep1:
+        sys.exit(f"❌ ERROR: {cfg['DEPTH_BOUNDS']} is not in an increasing order.")
+    # date0 and date1 can be identical (one day simulation)
+    elif date0 > date1:
+        sys.exit(f"❌ ERROR: {cfg['DATE_BOUNDS']} is not in an increasing order.")
+
+
     lat_range = slice(lat0, lat1)
     lon_range = slice(lon0, lon1)
     depth_range = slice(dep0, dep1)
@@ -57,7 +69,8 @@ def download_input(cfg, run_name):
                     start_datetime = date0,
                     end_datetime = date1
                 )
-                ds = process_ds(ds, cfg)
+                # no need slice_ds as already done above
+                ds = dims_ds(ds, cfg)
                 ds.to_netcdf(fname)
                 print(f"Saved: {fname}")
             else:
@@ -81,7 +94,8 @@ def download_input(cfg, run_name):
                     start_datetime = date0,
                     end_datetime = date1
                 )
-                ds = process_ds(ds, cfg)
+                # no need slice_ds as already done above
+                ds = dims_ds(ds, cfg)
                 ds.to_netcdf(fname)
                 print(f"Saved: {fname}")
             else:
@@ -91,7 +105,8 @@ def download_input(cfg, run_name):
     else:
         # load the reference ocean input data (to which the atmos data are interpolated)
         ds_ref = xr.open_dataset(ref_ocean)
-        ds_ref = process_ds(ds_ref, cfg)
+        ds_ref = dims_ds(ds_ref, cfg)
+        ds_ref = slice_ds(ds_ref, cfg)
 
     if atmos_source is not None:
             
@@ -102,8 +117,8 @@ def download_input(cfg, run_name):
             periods = pd.period_range(start=date0, end=date1, freq='M')
             
             c = cdsapi.Client()
-            north, south = max(lat0, lat1), min(lat0, lat1)
-            west, east = min(lon0, lon1), max(lon0, lon1)
+            #north, south = max(lat0, lat1), min(lat0, lat1)
+            #west, east = min(lon0, lon1), max(lon0, lon1)
             
             raw_files = []
             
@@ -129,7 +144,7 @@ def download_input(cfg, run_name):
                             ],
                             'date': f"{m_start}/{m_end}",
                             'time': [f"{str(h).zfill(2)}:00" for h in range(24)],
-                            'area': [north, west, south, east],
+                            'area': [lat1, lon0, lat0, lon1],
                             'format': 'netcdf',
                         }
                     )
@@ -139,8 +154,8 @@ def download_input(cfg, run_name):
 
                     # 3. Load the in-memory bytes into an Xarray Dataset
                     ds_wind = xr.open_dataset(io.BytesIO(response.content), engine='h5netcdf')
-                    
-                    ds_wind = process_ds(ds_wind, cfg)
+                    # no need slice_ds as already done above
+                    ds_wind = dims_ds(ds_wind, cfg)
                     ds_wind = resample_regrid(ds_wind, ds_ref)
                     ds_wind.to_netcdf(raw_wind_fname)
                 else:
@@ -159,7 +174,7 @@ def download_input(cfg, run_name):
                             ],
                             'date': f"{m_start}/{m_end}",
                             'time': [f"{str(h).zfill(2)}:00" for h in range(24)],
-                            'area': [north, west, south, east],
+                            'area': [lat1, lon0, lat0, lon1],
                             'format': 'netcdf',
                         }
                     )
@@ -169,8 +184,8 @@ def download_input(cfg, run_name):
 
                     # 3. Load the in-memory bytes into an Xarray Dataset
                     ds_solar = xr.open_dataset(io.BytesIO(response.content), engine='h5netcdf')
-
-                    ds_solar = process_ds(ds_solar, cfg)
+                    # no need slice_ds as already done above
+                    ds_solar = dims_ds(ds_solar, cfg)
                     ds_solar = resample_regrid(ds_solar, ds_ref)
                     ds_solar.to_netcdf(raw_solar_fname)
                 else:
@@ -188,7 +203,8 @@ def generate_climatology(cfg, run_name):
         print("\nGenerating BGC climatology from GLODAP...")
         # Load one time step to get depth, lat, lon
         ds_ref = xr.open_dataset(cfg['REF_OCEAN'])[cfg['VAR_OCEAN']].isel(time=0).squeeze()
-        ds_ref = process_ds(ds_ref, cfg)
+        ds_ref = dims_ds(ds_ref, cfg)
+        ds_ref = slice_ds(ds_ref, cfg)
         
         # Generate the climatology
         ds_clim = generate_restoring_climatology(ds_ref, glodap_dir)
@@ -206,46 +222,6 @@ def generate_climatology(cfg, run_name):
     else:
         print(f"{clim_out_path} already exits. Skipping.")                              
 
-def process_ds(ds, cfg):    
-    # 1. Rename dims/coords
-    rename_map = {
-        "longitude": "lon", 
-        "latitude": "lat", 
-        "valid_time": "time",
-        "dep": "depth"
-    }
-    # Check both dims and coords to catch all cases
-    rename_dict = {k: v for k, v in rename_map.items() if k in ds.dims or k in ds.coords}
-    ds = ds.rename(rename_dict)
-    
-    # 2. Fix negative depth (e.g., jcope2m)
-    if "depth" in ds.coords:
-        ds = ds.assign_coords(depth=abs(ds["depth"]))
-
-    # Sort spatial coordinates to ensure slice(min, max) never returns empty
-    sort_dims = [d for d in ["lon", "lat", "depth"] if d in ds.dims]
-    if sort_dims:
-        ds = ds.sortby(sort_dims)
-    
-    # 3. Extract bounds from config
-    lon0, lon1 = cfg['LON_BOUNDS']
-    lat0, lat1 = cfg['LAT_BOUNDS']
-    dep0, dep1 = cfg['DEPTH_BOUNDS']
-    
-    # 4. Build dynamic selection dictionary
-    sel_kwargs = {}
-    if "lon" in ds.dims:
-        sel_kwargs["lon"] = slice(lon0, lon1)
-    if "lat" in ds.dims:
-        sel_kwargs["lat"] = slice(lat0, lat1)
-    if "depth" in ds.dims:
-        sel_kwargs["depth"] = slice(dep0, dep1)
-        
-    # 5. Apply subset
-    if sel_kwargs:
-        ds = ds.sel(**sel_kwargs)
-        
-    return ds
 
 # Resample/Regrid
 def resample_regrid(ds,ds_ref):

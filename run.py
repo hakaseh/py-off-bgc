@@ -7,6 +7,7 @@ import warnings
 import numpy as np
 import xarray as xr
 import taichi as ti
+from source.utils import dims_ds,slice_ds
 
 from source.simulator import OfflineSimulator
 
@@ -23,15 +24,9 @@ def _load_local_var(filepath, varname):
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Missing input file: {filepath}")
             
-        ds = xr.open_dataset(filepath)
-        
-    # Auto-rename common weird dimension names from raw files
-    rename_map = {"longitude": "lon", 
-                  "latitude": "lat", 
-                  "valid_time": "time"
-                 }
-    rename_dict = {k: v for k, v in rename_map.items() if k in ds.dims}
-    return ds.rename(rename_dict)[varname]
+        ds = xr.open_dataset(filepath)  
+
+    return ds[varname]
 
 def run_simulation(cfg, config_file_path, run_name):
     # Initialize Taichi (Allows config to toggle GPU/CPU)
@@ -111,10 +106,15 @@ def run_simulation(cfg, config_file_path, run_name):
         if datasets.get("WIND_U") is not None and datasets.get("WIND_V") is not None:            
             datasets["WIND"] = np.sqrt(datasets["WIND_U"]**2 + datasets["WIND_V"]**2)
 
+        # not doing slice_ds because that is done in prep_forcing step (but reconsider this)
+        datasets[var_key] = dims_ds(datasets[var_key], cfg)
+
     # BGC Inputs (remove time dimension via suqeeze())
     ds_clim = xr.open_dataset(cfg['CLIM_FILE']).squeeze() if cfg['CLIM_FILE'] else None
+    ds_clim = dims_ds(ds_clim, cfg) if cfg['CLIM_FILE'] else None
     ds_restart = xr.open_dataset(cfg['RESTART_FILE']).squeeze() if cfg['RESTART_FILE'] else None
-
+    ds_restart = dims_ds(ds_restart, cfg) if cfg['RESTART_FILE'] else None
+    
     save_flags = {key: val.get('SAVE', False) for key, val in cfg['FORCING'].items()}
 
     # Initialize Simulator
