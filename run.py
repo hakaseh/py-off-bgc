@@ -7,9 +7,8 @@ import warnings
 import numpy as np
 import xarray as xr
 import taichi as ti
-from source.utils import dims_ds,slice_ds
-
-from source.simulator import OfflineSimulator
+from src.utils import dims_ds,slice_ds
+from src.simulator import OfflineSimulator
 
 def _load_local_var(filepath, varname):
     # Check if the path is a glob pattern (contains wildcards)

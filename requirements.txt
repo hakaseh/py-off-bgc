@@ -18,3 +18,4 @@ ipykernel
 matplotlib
 ncvue
 psutil
+zenodo-get

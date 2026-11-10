@@ -8,8 +8,8 @@ import cdsapi
 import pandas as pd
 import io
 import requests
-from source.utils import dims_ds,slice_ds
-from source.climatology import generate_restoring_climatology
+from src.utils import dims_ds,slice_ds
+from src.climatology import generate_restoring_climatology
 
 # Main program
 def download_input(cfg, run_name):

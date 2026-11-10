@@ -1,6 +1,10 @@
 # py-off-bgc: a Python-based offline simulator for ocean biogeochemistry
 
+**py-off-bgc** is a framework for running ocean biogeochemical (BGC) models offline, in which the advection-diffusion equations for BGC tracers are solved using daily 3D ocean temperature, salinity, and horizontal velocity data. It solves the BGC source-minus-sink equations using daily 2D atmospheric data. Consequently, it produces daily output of BGC tracers. 
+
 ## 🚀 Getting Started
+
+* py-off-bgc requires that the version of your Python is compatible with Taichi. Check the Python version associated with the latest release of Taichi from [here](https://pypi.org/project/taichi/#files) and make sure to use that version of below for the installation of py-off-bgc.
 
 ### 🖥️ Quick Visualization (Optional)
 To quickly visualize the NetCDF outputs from the terminal, this project uses `ncvue`. Because it requires Python's graphical interface (`tkinter`), you may need to install the system bindings before it will launch:
@@ -9,61 +13,68 @@ To quickly visualize the NetCDF outputs from the terminal, this project uses `nc
 * **Ubuntu/Debian:** `sudo apt-get install python3-tk`
 * **Windows:** No action needed (Tkinter is included in the official Windows Python installer).
 
-Once installed, simply run: `ncvue filename.nc`
+### Installation
 
-* py-off-bgc requires that the version of your Python is compatible with Taichi. Check the Python version associated with the latest release of Taichi from [here](https://pypi.org/project/taichi/#files) and make sure to use that version of below for the installation of py-off-bgc.
-
-* Install py-off-bgc
-
+* Download py-off-bgc using Git.
 ```
 git clone https://github.com/hakaseh/py-off-bgc.git
 cd py-off-bgc
 ```
 
-* Create a Python environment for py-off-bgc using either Conda or Pip.
-
-Via Conda
+* Create a Python environment for py-off-bgc using Pip.
 ```
-conda env create -f environment.yml
-source activate env
-```
-
-Via Pip
-```
-python -m venv env
+python3.12 -m venv env
 source env/bin/activate
 pip install -r requirements.txt
 ```
 
-* Add the environment to your Jupyter kernel (optional, but can be useful for analysis of the output using Jupyter)
+* Download GLODAPv2.2016b from [here](https://glodap.info/index.php/mapped-data-product/#:~:text=Mapped%20Data%20Product%20files). Unzip the zip file, rename the unzipped directory as `GLODAPv2.2016b`, and place it under `py-off-bgc/climatology/`.
+
+* **Optional**: Add the environment to your Jupyter kernel, which can be useful for analysis of the output using Jupyter.
 ```
 python -m ipykernel install --user --name=env --display-name="py-off-bgc"
 ```
 
-* Enable password-less access to Copernicus marine datasets (optional, but required for demo)
+* **Optional**: Enable password-less access to Copernicus marine datasets.
 ```
 copernicusmarine login
 ```
 (When prompted, enter the username and password)
 
-* Setup the CDS API key to allow ERA5 data download by following [this guide](https://cds.climate.copernicus.eu/how-to-api) (optional, but required for demo).
-
-
-* Download GLODAPv2.2016b from [here](https://glodap.info/index.php/mapped-data-product/#:~:text=Mapped%20Data%20Product%20files). Unzip the zip file and place the unzipped directory in `py-off-bgc/climatology/`.
+* **Optional**: Setup the CDS API key to allow ERA5 data download by following [this guide](https://cds.climate.copernicus.eu/how-to-api).
 
 
 
-## Demo (an example test case)
+
+## ⭐️ Demo (an example test case)
 If you want to learn how `py-off-bgc` works, follow the following steps. In this example, we use the NEMURO biogeochemical model in around Hokkaido driven by the Copernicus GOEPR reanalysis product.
 
+### Download the input data on [Zenodo](https://zenodo.org/records/24097751).
 ```
-python prep.py config/hokkaido2024.yaml
-```
-
-```
-python run.py config/hokkaido.yaml
+zenodo_get 24097751 -o input/demo-hokkaido-2024
 ```
 
+### Create the climatology
+```
+python prep.py config/demo-hokkaido-2024.yaml
+```
+
+### Run the NEMURO model
+```
+python run.py config/demo-hokkaido-2024.yaml
+```
+
+### Visualize the output
+`ncvue -x` is used here to load the data in sequence similar to `xarray.open_mfdataset`.
+
+```
+ncvue -x output/demo-hokkaido-2024/NEMURO/output_demo-hokkaido-2024_NEMURO_2024*.nc
+```
+
+## ☎️ Contact
+For questions and comments, feel free to create a new issue or replying to an existing one by visiting [Issues](https://github.com/hakaseh/py-off-bgc/issues). Alternatively, you can send a message to [@hakaseh](https://github.com/hakaseh).
+
+# ⚠️ The rest of the contents (below) are under construction
 
 ## Run files (to be moved to run/README.md)
 * Rename to required dimension names (lon, lat, depth, time)
