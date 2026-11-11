@@ -18,4 +18,6 @@ ipykernel
 matplotlib
 ncvue
 psutil
+requests 
+aiohttp
 zenodo-get
