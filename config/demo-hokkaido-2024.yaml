@@ -15,7 +15,7 @@ GLODAP_DIR: "climatology/GLODAPv2.2016b"
 BGC_MODEL: "NEMURO"
 DT_SEC: 3600.0
 USE_GPU: false
-MAX_THREADS: null
+CPU_THREADS: null
 
 FORCING:
   T:
