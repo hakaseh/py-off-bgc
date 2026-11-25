@@ -17,6 +17,7 @@ class OfflineSimulator:
                  exp_name, 
                  dt_phys, 
                  bgc_params=None,
+                 num_uv_filter=0,
                  sponge_width=5, 
                  tau_lateral=432000.0, 
                  tau_bottom=5184000.0,
@@ -29,6 +30,7 @@ class OfflineSimulator:
         self.dt_phys = dt_phys
         self.steps_per_day = int(86400 / self.dt_phys)
         self.bgc_params = bgc_params
+        self.num_uv_filter = num_uv_filter
         self.sponge_width = sponge_width
         self.tau_lateral = tau_lateral
         self.tau_bottom = tau_bottom
@@ -39,63 +41,33 @@ class OfflineSimulator:
         self.bgc_model = None
         self.ds_clim = None
 
-    def prepare_forcing(self, lat_range, lon_range, depth_range, time_range, 
-                        ds_forcing, ds_clim=None, ds_restart=None):
-        print("Preparing and subsetting forcing datasets...")
+    def prepare_forcing(self, ds_forcing, ds_clim=None, ds_restart=None):
+        print("Ingesting aligned forcing datasets...")
 
-        # --- Standardize raw coordinates before slicing to prevent size-0 arrays ---
-        for key in ["T", "S", "U", "V"]:
-            if ds_forcing[key] is not None:
-                # 1. Force depth to be positive
-                if "depth" in ds_forcing[key].coords:
-                    ds_forcing[key] = ds_forcing[key].assign_coords(depth=abs(ds_forcing[key]["depth"]))
-                
-                # 2. Sort coordinates so slice(min, max) never returns an empty array
-                sort_dims = [d for d in ["lon", "lat", "depth", "time"] if d in ds_forcing[key].dims]
-                ds_forcing[key] = ds_forcing[key].sortby(sort_dims)
-
-        self.ds_t = ds_forcing["T"].sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
-        self.ds_s = ds_forcing["S"].sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
-        self.ds_u = ds_forcing["U"].sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
-        self.ds_v = ds_forcing["V"].sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
-        self.ds_sw = ds_forcing["SW"].sel(time=time_range, lat=lat_range, lon=lon_range)
-
-
-        if ds_forcing["K"] is None:
-            self.ds_k = None
-        else:
-            self.ds_k = ds_forcing["K"].sel(time=time_range, depth=depth_range, lat=lat_range, lon=lon_range)
-
-        if ds_forcing["WIND"] is None:
-            self.ds_wind = xr.zeros_like(self.ds_sw)
-        else:
-            self.ds_wind = ds_forcing["WIND"].sel(time=time_range, lat=lat_range, lon=lon_range)
-
-        if ds_forcing["ICE"] is None:
-            self.ds_ice = xr.zeros_like(self.ds_sw)
-        else:
-            self.ds_ice = ds_forcing["ICE"].sel(time=time_range, lat=lat_range, lon=lon_range)
-
-        if ds_clim is not None:
-            self.ds_clim = ds_clim.sel(depth=depth_range, lat=lat_range, lon=lon_range)
-        else:
-            self.ds_clim = None
-
-        if ds_restart is not None:
-            self.ds_restart = ds_restart.squeeze().sel(depth=depth_range, lat=lat_range, lon=lon_range)
-        else: self.ds_restart = None
-
-        # Pre-load data entirely into Memory
-        print("Loading subsetted forcing data directly into RAM to bypass disk I/O...")
+        # 1. Assign perfectly aligned and sliced datasets to simulator attributes
+        self.ds_t = ds_forcing["T"]
+        self.ds_s = ds_forcing["S"]
+        self.ds_u = ds_forcing["U"]
+        self.ds_v = ds_forcing["V"]
+        self.ds_sw = ds_forcing["SW"]
+        self.ds_k = ds_forcing.get("K")
         
-        # 1. Calculate total memory needed
+        # Fallbacks for missing wind/ice are still safely handled here
+        self.ds_wind = ds_forcing.get("WIND") if ds_forcing.get("WIND") is not None else xr.zeros_like(self.ds_sw)
+        self.ds_ice = ds_forcing.get("ICE") if ds_forcing.get("ICE") is not None else xr.zeros_like(self.ds_sw)
+
+        self.ds_clim = ds_clim
+        self.ds_restart = ds_restart
+
+        # 2. Pre-load data entirely into Memory
+        print("Loading forcing data directly into RAM to bypass disk I/O...")
+        
         total_bytes = (
             self.ds_t.nbytes + self.ds_s.nbytes + self.ds_u.nbytes + 
             self.ds_v.nbytes + self.ds_sw.nbytes + self.ds_wind.nbytes + self.ds_ice.nbytes
         )
         total_gb = total_bytes / (1024 ** 3)
 
-        # psutil.virtual_memory() works identically on Mac, Linux, and Windows
         mem = psutil.virtual_memory()
         system_ram_gb = mem.total / (1024 ** 3)
         available_ram_gb = mem.available / (1024 ** 3)
@@ -103,45 +75,31 @@ class OfflineSimulator:
         print(f"  -> MEMORY CHECK: Dataset requires ~{total_gb:.2f} GB")
         print(f"  -> SYSTEM RAM: {system_ram_gb:.1f} GB (Available: {available_ram_gb:.1f} GB)")
 
-        # Set the limit to whichever is smaller: 75% of total RAM, or currently available RAM minus 2GB
         safe_limit_gb = min(system_ram_gb * 0.75, available_ram_gb - 2.0)
 
         if total_gb > safe_limit_gb:
             sys.exit(f"  -> [ERROR] Not enough memory! Requires {total_gb:.2f} GB, but safe limit is {safe_limit_gb:.2f} GB.")
 
-        # 2. Load with progress tracking
-        print("  -> Loading T...")
-        self.ds_t.load()
-        print("  -> Loading S...")
-        self.ds_s.load()
-        print("  -> Loading U...")
-        self.ds_u.load()
-        print("  -> Loading V...")
-        self.ds_v.load()
-        print("  -> Loading SW...")
-        self.ds_sw.load()
-        print("  -> Loading WIND...")
-        self.ds_wind.load()
-        print("  -> Loading ICE...")
-        self.ds_ice.load()
-        
-        if getattr(self, 'ds_k', None) is not None: 
-            print("  -> Loading K...")
-            self.ds_k.load()
-        if getattr(self, 'ds_clim', None) is not None:
-            print("  -> Loading Climatology...")
-            self.ds_clim.load()
-        if getattr(self, 'ds_restart', None) is not None:
-            print("  -> Loading Restart...")
-            self.ds_restart.load()
+        # 3. Load into RAM
+        for var_name, ds in [#("T", self.ds_t), ("S", self.ds_s), ("U", self.ds_u), 
+                             #("V", self.ds_v), ("SW", self.ds_sw), ("WIND", self.ds_wind), 
+                             #("ICE", self.ds_ice), ("K", self.ds_k), 
+                             ("Climatology", self.ds_clim), ("Restart", self.ds_restart)]:
+            if ds is not None:
+                print(f"  -> Loading {var_name}...")
+                ds.load()
             
         print("Data successfully loaded into RAM!")
 
+        # 4. Final initialization steps
         self.setup_grid()
-        
         print(f"Initializing BGC Model: {self.bgc_model_choice}...")
-        self.bgc_model = bgc_models.get_model(self.bgc_model_choice, self.nz, self.ny, self.nx, self.water_mask, params=self.bgc_params)
+        self.bgc_model = bgc_models.get_model(
+            self.bgc_model_choice, self.nz, self.ny, self.nx, 
+            self.water_mask, params=self.bgc_params
+        )
         self.bgc_model.initialize(ds_restart=ds_restart, ds_clim=self.ds_clim)
+        
         if ds_restart is not None:
             ds_restart.close()
 
@@ -182,12 +140,13 @@ class OfflineSimulator:
         self.ti_u = ti.field(dtype=ti.f32, shape=shape_3d)
         self.ti_v = ti.field(dtype=ti.f32, shape=shape_3d)
         self.ti_w = ti.field(dtype=ti.f32, shape=(self.nz + 1, self.ny, self.nx))        
+        self.ti_u_temp = ti.field(dtype=ti.f32, shape=shape_3d)
+        self.ti_v_temp = ti.field(dtype=ti.f32, shape=shape_3d)
         self.ti_rho = ti.field(dtype=ti.f32, shape=shape_3d)
         self.ti_kz = ti.field(dtype=ti.f32, shape=shape_3d)
         self.ti_dz = ti.field(dtype=ti.f32, shape=shape_3d)
         self.ti_tracer = ti.field(dtype=ti.f32, shape=shape_3d)
         self.ti_tracer_new = ti.field(dtype=ti.f32, shape=shape_3d)
-        
         self.ti_cp = ti.field(dtype=ti.f32, shape=shape_3d)
         self.ti_dp = ti.field(dtype=ti.f32, shape=shape_3d)        
 
@@ -247,13 +206,14 @@ class OfflineSimulator:
             v = np.nan_to_num(self.ds_v.isel(time=day).values).copy()
             s = np.maximum(s, 0.0)
             
-            sw = np.nan_to_num(self.ds_sw.isel(time=day).values).copy()
-            wind_surf = np.nan_to_num(self.ds_wind.isel(time=day).values).copy() 
-            ice_surf = np.nan_to_num(self.ds_ice.isel(time=day).values).copy()            
+            #sw = np.nan_to_num(self.ds_sw.isel(time=day).values).copy()
+            #wind_surf = np.nan_to_num(self.ds_wind.isel(time=day).values).copy() 
+            #ice_surf = np.nan_to_num(self.ds_ice.isel(time=day).values).copy()            
             
             # 2. Physics & State Setup
             SA = gsw.SA_from_SP(s, self.p_3d, self.lon_2d, self.lat_2d)
             CT = gsw.CT_from_pt(SA, t)
+            # rho_3d is density anomaly (add 1000 if you want the actual density)
             rho_3d = np.where(self.water_mask, gsw.sigma0(SA, CT), 0.0)
             u[~self.water_mask] = 0.0
             v[~self.water_mask] = 0.0
@@ -264,11 +224,24 @@ class OfflineSimulator:
             self.ti_rho.from_numpy(rho_3d.astype(np.float32))
             
             # --- Execute Taichi Physics Kernels ---
-            physics.calculate_w_rigid_lid_ti(self.ti_u, self.ti_v, self.ti_dz, self.ti_dx, self.ti_dy, self.ti_w)
+            # 1. Lightly smooth U and V to avoid checkerboard
+            for _ in range(self.num_uv_filter):
+                physics.filter_uv_checkerboard_ti(self.ti_u, self.ti_v, self.ti_u_temp, self.ti_v_temp, self.ti_dz)
+                physics.copy_uv_back_ti(self.ti_u, self.ti_v, self.ti_u_temp, self.ti_v_temp)
+            
+            # 2. Calculate W using the smoothed horizontal velocities
+            physics.calculate_w_rigid_lid_ti(self.ti_u, self.ti_v, self.ti_dz, self.ti_dx, self.ti_dy, self.ti_w)           
+
             physics.calculate_mld_ti(self.ti_rho, self.ti_dz, self.ti_mld)
             
             if self.ds_k is None:
-                physics.calculate_full_kz_ti(self.ti_mld, self.ti_rho, self.ti_dz, self.ti_kz, 1e-2, 1e-6, 1e-5, 1e-4)
+                #physics.calculate_full_kz_ti(self.ti_mld, self.ti_rho, self.ti_dz, self.ti_kz, 1e-2, 1e-6, 1e-5, 1e-4)
+                # 3. Calculate Vertical Mixing Profile
+                # (Set k_mld_max to 0.01 or 0.1 to ensure strong winter convection)
+                physics.calculate_full_kz_ti(
+                    self.ti_mld, self.ti_rho, self.ti_dz, self.ti_kz,
+                    k_mld_max=0.05, k_bg_min=1e-5, k_deep_max=1e-3, k_boundary=1e-4
+                )
             else:
                 k_val = np.nan_to_num(self.ds_k.isel(time=day).values).copy()
                 self.ti_kz.from_numpy(k_val.astype(np.float32))
@@ -279,19 +252,52 @@ class OfflineSimulator:
             
             if "oxygen" in self.bgc_model.tracers:
                 o2_sat_umol_kg = gsw.O2sol_SP_pt(s[0, :, :], t[0, :, :])
-                o2_sat_mmol_m3 = o2_sat_umol_kg * (rho_3d[0, :, :] / 1000.0)
+                o2_sat_mmol_m3 = o2_sat_umol_kg * ((rho_3d[0, :, :] + 1000.0) / 1000.0)
             
             is_glob_int = 1 if self.is_global else 0
 
+
+            current_time = self.ds_t.isel(time=day).time.values
+            
+            # Truncate to midnight (00:00:00) so sub-steps always span [00:00, 24:00)
+            day_start = current_time.astype("datetime64[D]").astype("datetime64[ns]")
+            date_str = str(day_start)[:10]  # e.g., "1993-01-12"
+            
+            # Sub-step timestamps now cleanly cover the exact calendar day
+            step_times = day_start + np.arange(self.steps_per_day) * np.timedelta64(int(self.dt_phys), "s")
+                        
+            # 1. Load just this day's slice from disk into RAM
+            # slice() is used to prevent time dimension being dropped in case of daily data
+            sw_day_da = self.ds_sw.sel(time=slice(date_str, date_str)).load()
+            wind_day_da = self.ds_wind.sel(time=slice(date_str, date_str)).load()
+            ice_day_da = self.ds_ice.sel(time=slice(date_str, date_str)).load()
+            
+            # 2. Align to sub-steps ONCE (use method="nearest" for step-wise, instead of .interp() for smooth, to avoid potential negative values for sw/ice)
+            sw_steps = np.nan_to_num(
+                sw_day_da.sel(time=step_times, method='nearest').values
+            ).astype(np.float32)
+            wind_steps = np.nan_to_num(
+                wind_day_da.sel(time=step_times, method='nearest').values
+            ).astype(np.float32)
+            ice_steps = np.nan_to_num(
+                ice_day_da.sel(time=step_times, method='nearest').values
+            ).astype(np.float32)
+            
+            par_3d_daily = np.zeros_like(t, dtype=np.float32)
             # --- SUB-STEPPED LOOP ---
             for step in range(self.steps_per_day):
+                sw = sw_steps[step]
+                wind_surf = wind_steps[step]
+                ice_surf = ice_steps[step]
                 
-                # A. PHYSICS (TAICHI GPU)
+                # ==========================================
+                # A. ADVECTION (TAICHI GPU)
+                # ==========================================
                 for name, tr_data in self.bgc_model.tracers.items():
                     # Stream CPU array to GPU
                     self.ti_tracer.from_numpy(tr_data.astype(np.float32))
-                    
-                    # Compute advection & diffusion directly on the GPU
+
+                    # 1. Advection (Unsplit 3D TVD)
                     physics.advection_3d_tvd_ti(
                         self.ti_tracer, 
                         self.ti_tracer_new, 
@@ -304,21 +310,12 @@ class OfflineSimulator:
                         float(self.dt_phys), 
                         is_glob_int
                     )
-                    physics.diffusion_implicit_vertical_ti(
-                        self.ti_tracer_new, 
-                        self.ti_kz, 
-                        self.ti_dz, 
-                        self.ti_cp, 
-                        self.ti_dp, 
-                        float(self.dt_phys)
-                    )
-                    #physics.advection_neumann_ti(self.ti_tracer, self.ti_tracer_new, self.ti_u, self.ti_v, self.ti_w, self.ti_dz, self.ti_dx, self.ti_dy, float(self.dt_phys), is_glob_int)
-                    #physics.diffusion_robust_ti(self.ti_tracer_new, self.ti_kz, self.ti_dz, float(self.dt_phys))
-                        
-                    # Stream updated array back to CPU and clamp
+                    # Pull advected tracers back to CPU
                     self.bgc_model.tracers[name] = np.maximum(self.ti_tracer_new.to_numpy(), 0.0)
 
-                # B. RESTORING (TAICHI)
+                # ==========================================
+                # B. RESTORING 
+                # ==========================================
                 for var_name, clim_data in self.restoring_data.items():
                     physics.apply_restoring_ti(
                         self.bgc_model.tracers[var_name], 
@@ -326,14 +323,19 @@ class OfflineSimulator:
                         self.nudge_map
                     )
 
+                # ==========================================
                 # C. BIOLOGY & SINKING (NUMBA CPU)
-                par_3d = self.bgc_model.biology_step(t, sw, self.dz_static, self.dt_phys)
+                # ==========================================
+                par_3d = self.bgc_model.biology_step(t, sw, ice_surf, self.dz_static, self.dt_phys)
+                par_3d_daily += par_3d / self.steps_per_day  # Accumulate daily mean PAR                
                 self.bgc_model.sinking_step(self.dz_static, self.dt_phys)
 
                 for name, tr_data in self.bgc_model.tracers.items():
                     self.bgc_model.tracers[name] = np.maximum(tr_data, 0.0)
 
+                # ==========================================
                 # D. AIR-SEA FLUX (TAICHI GPU)
+                # ==========================================
                 if "oxygen" in self.bgc_model.tracers:
                     self.ti_o2_surf.from_numpy(self.bgc_model.tracers["oxygen"][0, :, :].astype(np.float32))
                     self.ti_o2_sat.from_numpy(o2_sat_mmol_m3.astype(np.float32))
@@ -344,10 +346,32 @@ class OfflineSimulator:
                     physics.calc_o2_flux_ti(self.ti_o2_surf, self.ti_o2_sat, self.ti_temp_surf, self.ti_wind_surf, self.ti_ice_surf, self.ti_dz_surf, float(self.dt_phys))
                     
                     self.bgc_model.tracers["oxygen"][0, :, :] = np.maximum(self.ti_o2_surf.to_numpy(), 0.0)
+
+                # ==========================================
+                # E. VERTICAL DIFFUSION (TAICHI GPU)
+                # ==========================================
+                for name, tr_data in self.bgc_model.tracers.items():
+                    # Push the advected + biologically updated + gas-exchanged tracers to GPU
+                    self.ti_tracer.from_numpy(tr_data.astype(np.float32))
+                    
+                    # Diffusion smoothly mixes everything down the water column
+                    physics.diffusion_implicit_vertical_ti(
+                        self.ti_tracer, 
+                        self.ti_kz, 
+                        self.ti_dz, 
+                        self.ti_cp, 
+                        self.ti_dp, 
+                        float(self.dt_phys)
+                    )
+                        
+                    # Final pull back to CPU
+                    self.bgc_model.tracers[name] = np.maximum(self.ti_tracer.to_numpy(), 0.0)
                 
             # Save Output
             # Note: We pass the pulled NumPy mld and kz arrays
-            self.save_day(day, self.ds_t.isel(time=day).time.values, par_3d, rho_3d, kz_3d_np, t, s, u, v, mld_2d_np, sw, wind_surf, ice_surf)
+            #self.save_day(day, self.ds_t.isel(time=day).time.values, par_3d, rho_3d, kz_3d_np, t, s, u, v, mld_2d_np, sw, wind_surf, ice_surf)
+            self.save_day(day, self.ds_t.isel(time=day).time.values, par_3d_daily, rho_3d, kz_3d_np, t, s, u, v, mld_2d_np, 
+                          sw_day_da.mean('time'), wind_day_da.mean('time'), ice_day_da.mean('time'))
 
     def save_day(self, day, current_time, par_3d, rho_3d, kz_3d_np, t, s, u, v, mld_2d_np, sw, wind_surf, ice_surf):
         

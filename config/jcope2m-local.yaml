@@ -1,67 +1,68 @@
 # Variables used in all programs
-LON_BOUNDS: [117, 180]
-LAT_BOUNDS: [17, 60]
-DEPTH_BOUNDS: [null, 1000]
-DATE_BOUNDS: ["19930101", "19930131"]
+LON_BOUNDS: [117, 150]
+LAT_BOUNDS: [17, 50]
+DEPTH_BOUNDS: [0, 1000]
+DATE_BOUNDS: ["19930101", "19931231"]
 
 # Variables used in prep.py
 OCEAN_SOURCE: null
-ATMOS_SOURCE: "cds_era5"
+ATMOS_SOURCE: null
 REF_OCEAN: "input/JCOPE2M/best_estimate/T_19930101.nc"
 VAR_OCEAN: "TT"
-GLODAP_DIR: "climatology/GLODAPv2.2016b_MappedClimatologies"
+GLODAP_DIR: "climatology/GLODAPv2.2016b"
 
 # Variables used in run.py
 BGC_MODEL: "NEMURO"
 DT_SEC: 900.0
 USE_GPU: false
-MAX_THREADS: null
+CPU_THREADS: null
 
 FORCING:
   T:
-    FILE: "input/JCOPE2M/best_estimate/T_199301*.nc"
+    FILE: "input/JCOPE2M/best_estimate/T_1993*.nc"
     NAME: "TT"
     SAVE: true
   S:
-    FILE: "input/JCOPE2M/best_estimate/S_199301*.nc"
+    FILE: "input/JCOPE2M/best_estimate/S_1993*.nc"
     NAME: "ST"
-    SAVE: false
+    SAVE: true
   U:
-    FILE: "input/JCOPE2M/best_estimate/UI_199301*.nc"
+    FILE: "input/JCOPE2M/best_estimate/UI_1993*.nc"
     NAME: "UI"
-    SAVE: false
+    SAVE: true
   V:
-    FILE: "input/JCOPE2M/best_estimate/VI_199301*.nc"
+    FILE: "input/JCOPE2M/best_estimate/VI_1993*.nc"
     NAME: "VI"
-    SAVE: false
+    SAVE: true
   SW:
-    FILE: "input/jcope2m/cds_era5_solar_1993*.nc"
-    NAME: "avg_sdswrf"
+    FILE: "/home/hakaseh/data/JRA55-do-1-6-0/wget/rsds_input4MIPs_atmosphericState_OMIP_MRI-JRA55-do-1-6-0_gr_1993*.nc"
+    NAME: "rsds"
     SAVE: true
   WIND:
     FILE: null
     NAME: null
-    SAVE: false
+    SAVE: true
   WIND_U:
-    FILE: "input/jcope2m/cds_era5_wind_1993*.nc"
-    NAME: "u10"
+    FILE: "/home/hakaseh/data/JRA55-do-1-6-0/wget/uas_input4MIPs_atmosphericState_OMIP_MRI-JRA55-do-1-6-0_gr_1993*.nc"
+    NAME: "uas"
   WIND_V:
-    FILE: "input/jcope2m/cds_era5_wind_1993*.nc"
-    NAME: "v10"
+    FILE: "/home/hakaseh/data/JRA55-do-1-6-0/wget/vas_input4MIPs_atmosphericState_OMIP_MRI-JRA55-do-1-6-0_gr_1993*.nc"
+    NAME: "vas"
   ICE:
-    FILE: null
-    NAME: "siconc_mean"
-    SAVE: false
+    FILE: "/home/hakaseh/data/JRA55-do-1-6-0/wget/siconc_input4MIPs_atmosphericState_OMIP_MRI-JRA55-do-1-6-0_gn_1993*.nc"
+    NAME: "siconc"
+    SAVE: true
   K:
     FILE: null
     NAME: null
     SAVE: true
 
-SPONGE_WIDTH: 1
-TAU_LATERAL: 86400.0
-TAU_BOTTOM: 2592000.0
-TAU_COAST: 86400.0
+NUM_UV_FILTER: 4
+SPONGE_WIDTH: 10
+TAU_LATERAL: 864000
+TAU_BOTTOM: 2592000
+TAU_COAST: 2592000
 IS_GLOBAL: false
 
 RESTART_FILE: null
-CLIM_FILE: "input/jcope2m/bgc_climatology_jcope2m.nc"
+CLIM_FILE: "input/jcope2m-local/bgc_climatology_jcope2m-local.nc"

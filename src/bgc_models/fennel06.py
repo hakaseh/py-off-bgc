@@ -167,7 +167,7 @@ class Model_FENNEL06(BaseBGCModel):
         # 1. Calc Shared PAR (In-place update of self.par_3d)
         psum = self.tracers['chl']
         self.par_3d.fill(0.0)
-        calculate_par_ti(sw_curr.astype(np.float32), psum, dz.astype(np.float32), self.par_3d)
+        calculate_par_ti(sw_curr.astype(np.float32), ice_curr.astype(np.float32), psum, dz.astype(np.float32), self.par_3d)
 
         # 2. Call the Taichi GPU Kernel 
         fennel_kernel_ti(

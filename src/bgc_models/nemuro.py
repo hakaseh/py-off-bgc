@@ -180,13 +180,13 @@ class Model_NEMURO(BaseBGCModel):
             'Opal': self.params.p_setvo
         }  
 
-    def biology_step(self, t_curr, sw_curr, dz, dt):
+    def biology_step(self, t_curr, sw_curr, ice_curr, dz, dt):
         """Step biology forward directly on the GPU."""
         
         # 1. Calc Shared PAR (In-place update of self.par_3d)
         psum = self.tracers['schl'] + self.tracers['lchl']
         self.par_3d.fill(0.0)
-        calculate_par_ti(sw_curr.astype(np.float32), psum, dz.astype(np.float32), self.par_3d)
+        calculate_par_ti(sw_curr.astype(np.float32), ice_curr.astype(np.float32), psum, dz.astype(np.float32), self.par_3d)
 
         # 2. Call the Taichi GPU Kernel 
         nemuro_kernel_ti(

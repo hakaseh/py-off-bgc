@@ -14,6 +14,7 @@ GLODAP_MAP = {
 @ti.kernel
 def calculate_par_ti(
     sw_surface: ti.types.ndarray(), 
+    ice: ti.types.ndarray(),
     psum: ti.types.ndarray(), 
     dz: ti.types.ndarray(), 
     par: ti.types.ndarray()
@@ -26,8 +27,9 @@ def calculate_par_ti(
     
     for j, i in ti.ndrange(ny, nx):
         if dz[0, j, i] > 1e-6:
+            open_water = ti.max(0.0, 1.0 - ice[j, i])
             # 1. Surface light (approx 43% of SW radiation)
-            light = sw_surface[j, i] * 0.43
+            light = open_water * sw_surface[j, i] * 0.43
             
             # 2. Iterate down the water column
             for k in range(nz):

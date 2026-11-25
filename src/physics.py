@@ -153,12 +153,66 @@ def apply_restoring_ti(
 # ==========================================
 @ti.func
 def van_leer_limiter(r):
-    """
-    Van Leer flux limiter: Smoothly limits gradients to prevent numerical diffusion
-    and preserve monotonicity (prevents negative concentrations).
-    """
     return (r + ti.abs(r)) / (1.0 + ti.abs(r))
 
+@ti.func
+def minmod_limiter(r):
+    return ti.max(0.0, ti.min(1.0, r))
+    
+@ti.kernel
+def filter_uv_checkerboard_ti(
+    u: ti.template(), v: ti.template(), 
+    u_temp: ti.template(), v_temp: ti.template(), 
+    dz: ti.template()
+):
+    nz, ny, nx = u.shape
+    
+    # 1. Copy original values to the temp arrays
+    for k, j, i in u:
+        u_temp[k, j, i] = u[k, j, i]
+        v_temp[k, j, i] = v[k, j, i]
+
+    # 2. Mask-aware smoothing (only average with valid ocean neighbors)
+    for k, j, i in ti.ndrange(nz, (1, ny-1), (1, nx-1)):
+        if dz[k, j, i] > 1e-6:
+            u_sum = u[k, j, i]
+            v_sum = v[k, j, i]
+            valid_weight = 1.0
+            
+            # Check West
+            if dz[k, j, i-1] > 1e-6:
+                u_sum += 0.5 * u[k, j, i-1]
+                v_sum += 0.5 * v[k, j, i-1]
+                valid_weight += 0.5
+                
+            # Check East
+            if dz[k, j, i+1] > 1e-6:
+                u_sum += 0.5 * u[k, j, i+1]
+                v_sum += 0.5 * v[k, j, i+1]
+                valid_weight += 0.5
+                
+            # Check South
+            if dz[k, j-1, i] > 1e-6:
+                u_sum += 0.5 * u[k, j-1, i]
+                v_sum += 0.5 * v[k, j-1, i]
+                valid_weight += 0.5
+                
+            # Check North
+            if dz[k, j+1, i] > 1e-6:
+                u_sum += 0.5 * u[k, j+1, i]
+                v_sum += 0.5 * v[k, j+1, i]
+                valid_weight += 0.5
+            
+            # Normalize by the actual number of valid ocean neighbors
+            u_temp[k, j, i] = u_sum / valid_weight
+            v_temp[k, j, i] = v_sum / valid_weight
+
+@ti.kernel
+def copy_uv_back_ti(u: ti.template(), v: ti.template(), u_temp: ti.template(), v_temp: ti.template()):
+    for I in ti.grouped(u):
+        u[I] = u_temp[I]
+        v[I] = v_temp[I]
+        
 @ti.kernel
 def advection_3d_tvd_ti(
     tracer: ti.template(), tracer_new: ti.template(),
@@ -172,7 +226,7 @@ def advection_3d_tvd_ti(
     for k, j, i in tracer:
         tracer_new[k, j, i] = tracer[k, j, i]
 
-    # 2. Compute 3D TVD advection for the inner domain
+    # 2. Compute Conservative 3D TVD advection for the inner domain
     for k, j, i in ti.ndrange((1, nz - 1), (1, ny - 1), nx):
         if is_global == 0 and (i == 0 or i == nx - 1):
             continue
@@ -181,78 +235,222 @@ def advection_3d_tvd_ti(
             c = tracer[k, j, i]
             
             # ==========================================
-            # X-AXIS (Zonal) TVD
+            # X-AXIS (Zonal) Interface Velocities
             # ==========================================
-            u_val = u[k, j, i]
-            i_up = i - 1 if u_val > 0.0 else i + 1
-            i_up_up = i - 2 if u_val > 0.0 else i + 2
-            
-            # Handle periodic wrapping for global domains, clamping for regional
+            i_w = i - 1 if (is_global == 1 or i > 0) else 0
+            i_e = i + 1 if (is_global == 1 or i < nx - 1) else nx - 1
             if is_global == 1:
-                if i_up < 0: i_up += nx
-                elif i_up >= nx: i_up -= nx
-                if i_up_up < 0: i_up_up += nx
-                elif i_up_up >= nx: i_up_up -= nx
+                if i_w < 0: i_w += nx
+                if i_e >= nx: i_e -= nx
+
+            # STRICT WALL BLOCKING: If adjacent cell is land, flux is 0.0
+            u_w = 0.0 if dz[k, j, i_w] < 1e-6 else 0.5 * (u[k, j, i_w] + u[k, j, i])
+            u_e = 0.0 if dz[k, j, i_e] < 1e-6 else 0.5 * (u[k, j, i] + u[k, j, i_e])
+            
+            # --- West Face Flux ---
+            i_up_w = i_w if u_w > 0.0 else i
+            i_dn_w = i if u_w > 0.0 else i_w
+            i_up_up_w = i_w - 1 if u_w > 0.0 else i + 1
+            if is_global == 1:
+                if i_up_up_w < 0: i_up_up_w += nx
+                elif i_up_up_w >= nx: i_up_up_w -= nx
             else:
-                i_up = ti.max(0, ti.min(nx - 1, i_up))
-                i_up_up = ti.max(0, ti.min(nx - 1, i_up_up))
+                # CLAMP ALL INDICES TO PREVENT OUT-OF-BOUNDS AT OPEN EDGES
+                i_up_w = ti.max(0, ti.min(nx - 1, i_up_w))
+                i_dn_w = ti.max(0, ti.min(nx - 1, i_dn_w))
+                i_up_up_w = ti.max(0, ti.min(nx - 1, i_up_up_w))
+
+            c_up_w = tracer[k, j, i_up_w]
+            c_dn_w = tracer[k, j, i_dn_w]
+            c_up_up_w = tracer[k, j, i_up_up_w]
+            
+            denom_w = c_dn_w - c_up_w
+            r_w = 0.0
+            if ti.abs(denom_w) > 1e-8:
+                r_w = (c_up_w - c_up_up_w) / denom_w
                 
-            c_up_x = tracer[k, j, i_up] if dz[k, j, i_up] > 1e-6 else c
-            c_up_up_x = tracer[k, j, i_up_up] if dz[k, j, i_up_up] > 1e-6 else c_up_x
+            cfl_w = ti.abs(u_w) * dt / dx[j, i]
             
-            r_x = (c_up_x - c_up_up_x) / (c - c_up_x + 1e-10)
-            cfl_x = ti.abs(u_val) * dt / dx[j, i]
-            
-            flux_x = ti.abs(u_val) * (c - c_up_x) / dx[j, i]
-            corr_x = 0.5 * ti.abs(u_val) * (1.0 - cfl_x) * van_leer_limiter(r_x) * (c - c_up_x) / dx[j, i]
-            term_x = flux_x + corr_x
+            # EXPLICIT 1ST-ORDER UPWIND FALLBACK AT WESTERN BOUNDARY
+            flux_w = 0.0
+            if is_global == 0 and (i <= 1 or i >= nx - 1):
+                flux_w = u_w * c_up_w
+            else:
+                flux_w = u_w * c_up_w + 0.5 * ti.abs(u_w) * (1.0 - cfl_w) * van_leer_limiter(r_w) * denom_w
 
-            # ==========================================
-            # Y-AXIS (Meridional) TVD
-            # ==========================================
-            v_val = v[k, j, i]
-            j_up = j - 1 if v_val > 0.0 else j + 1
-            j_up_up = j - 2 if v_val > 0.0 else j + 2
-            
-            j_up = ti.max(0, ti.min(ny - 1, j_up))
-            j_up_up = ti.max(0, ti.min(ny - 1, j_up_up))
-            
-            c_up_y = tracer[k, j_up, i] if dz[k, j_up, i] > 1e-6 else c
-            c_up_up_y = tracer[k, j_up_up, i] if dz[k, j_up_up, i] > 1e-6 else c_up_y
-            
-            r_y = (c_up_y - c_up_up_y) / (c - c_up_y + 1e-10)
-            cfl_y = ti.abs(v_val) * dt / dy[j, i]
-            
-            flux_y = ti.abs(v_val) * (c - c_up_y) / dy[j, i]
-            corr_y = 0.5 * ti.abs(v_val) * (1.0 - cfl_y) * van_leer_limiter(r_y) * (c - c_up_y) / dy[j, i]
-            term_y = flux_y + corr_y
-
-            # ==========================================
-            # Z-AXIS (Vertical) TVD
-            # ==========================================
-            w_val = 0.5 * (w[k, j, i] + w[k+1, j, i]) if k < nz - 1 else 0.5 * w[k, j, i]
-            
-            k_up = k + 1 if w_val > 0.0 else k - 1
-            k_up_up = k + 2 if w_val > 0.0 else k - 2
-            
-            k_up = ti.max(0, ti.min(nz - 1, k_up))
-            k_up_up = ti.max(0, ti.min(nz - 1, k_up_up))
-            
-            c_up_z = tracer[k_up, j, i] if dz[k_up, j, i] > 1e-6 else c
-            c_up_up_z = tracer[k_up_up, j, i] if dz[k_up_up, j, i] > 1e-6 else c_up_z
-            
-            r_z = (c_up_z - c_up_up_z) / (c - c_up_z + 1e-10)
-            cfl_z = ti.abs(w_val) * dt / dz[k, j, i]
-            
-            flux_z = ti.abs(w_val) * (c - c_up_z) / dz[k, j, i]
-            corr_z = 0.5 * ti.abs(w_val) * (1.0 - cfl_z) * van_leer_limiter(r_z) * (c - c_up_z) / dz[k, j, i]
-            term_z = flux_z + corr_z
+            # --- East Face Flux ---
+            i_up_e = i if u_e > 0.0 else i_e
+            i_dn_e = i_e if u_e > 0.0 else i
+            i_up_up_e = i - 1 if u_e > 0.0 else i_e + 1
+            if is_global == 1:
+                if i_up_up_e < 0: i_up_up_e += nx
+                elif i_up_up_e >= nx: i_up_up_e -= nx
                 
-            # ==========================================
-            # Final Time Integration
-            # ==========================================
-            tracer_new[k, j, i] = ti.max(0.0, c - dt * (term_x + term_y + term_z))
+                if i_up_e >= nx: i_up_e -= nx
+                if i_dn_e >= nx: i_dn_e -= nx
+            else:
+                # CLAMP ALL INDICES TO PREVENT OUT-OF-BOUNDS AT OPEN EDGES
+                i_up_e = ti.max(0, ti.min(nx - 1, i_up_e))
+                i_dn_e = ti.max(0, ti.min(nx - 1, i_dn_e))
+                i_up_up_e = ti.max(0, ti.min(nx - 1, i_up_up_e))
 
+            c_up_e = tracer[k, j, i_up_e]
+            c_dn_e = tracer[k, j, i_dn_e]
+            c_up_up_e = tracer[k, j, i_up_up_e]
+            
+            denom_e = c_dn_e - c_up_e
+            r_e = 0.0
+            if ti.abs(denom_e) > 1e-8:
+                r_e = (c_up_e - c_up_up_e) / denom_e
+                
+            cfl_e = ti.abs(u_e) * dt / dx[j, i]
+            
+            # EXPLICIT 1ST-ORDER UPWIND FALLBACK AT EASTERN BOUNDARY
+            flux_e = 0.0
+            if is_global == 0 and (i <= 0 or i >= nx - 2):
+                flux_e = u_e * c_up_e
+            else:
+                flux_e = u_e * c_up_e + 0.5 * ti.abs(u_e) * (1.0 - cfl_e) * van_leer_limiter(r_e) * denom_e
+
+            term_x = (flux_e - flux_w) / dx[j, i]
+
+            # ==========================================
+            # Y-AXIS (Meridional) Interface Velocities
+            # ==========================================
+            j_s = ti.max(0, j - 1)
+            j_n = ti.min(ny - 1, j + 1)
+            
+            # STRICT WALL BLOCKING: If adjacent cell is land, flux is 0.0
+            v_s = 0.0 if dz[k, j_s, i] < 1e-6 else 0.5 * (v[k, j_s, i] + v[k, j, i])
+            v_n = 0.0 if dz[k, j_n, i] < 1e-6 else 0.5 * (v[k, j, i] + v[k, j_n, i])
+            
+            # --- South Face Flux ---
+            j_up_s = j_s if v_s > 0.0 else j
+            j_dn_s = j if v_s > 0.0 else j_s
+            j_up_up_s = ti.max(0, ti.min(ny - 1, j_s - 1 if v_s > 0.0 else j + 1))
+            
+            # CLAMP ALL INDICES TO PREVENT OUT-OF-BOUNDS AT OPEN EDGES
+            if is_global == 0:
+                j_up_s = ti.max(0, ti.min(ny - 1, j_up_s))
+                j_dn_s = ti.max(0, ti.min(ny - 1, j_dn_s))
+                j_up_up_s = ti.max(0, ti.min(ny - 1, j_up_up_s))
+            
+            c_up_s = tracer[k, j_up_s, i]
+            c_dn_s = tracer[k, j_dn_s, i]
+            c_up_up_s = tracer[k, j_up_up_s, i]
+            
+            denom_s = c_dn_s - c_up_s
+            r_s = 0.0
+            if ti.abs(denom_s) > 1e-8:
+                r_s = (c_up_s - c_up_up_s) / denom_s
+                
+            cfl_s = ti.abs(v_s) * dt / dy[j, i]
+            
+            # EXPLICIT 1ST-ORDER UPWIND FALLBACK AT SOUTHERN BOUNDARY
+            flux_s = 0.0
+            if is_global == 0 and (j <= 1 or j >= ny - 1):
+                flux_s = v_s * c_up_s
+            else:
+                flux_s = v_s * c_up_s + 0.5 * ti.abs(v_s) * (1.0 - cfl_s) * van_leer_limiter(r_s) * denom_s
+
+            # --- North Face Flux ---
+            j_up_n = j if v_n > 0.0 else j_n
+            j_dn_n = j_n if v_n > 0.0 else j
+            j_up_up_n = ti.max(0, ti.min(ny - 1, j - 1 if v_n > 0.0 else j_n + 1))
+            
+            # CLAMP ALL INDICES TO PREVENT OUT-OF-BOUNDS AT OPEN EDGES
+            if is_global == 0:
+                j_up_n = ti.max(0, ti.min(ny - 1, j_up_n))
+                j_dn_n = ti.max(0, ti.min(ny - 1, j_dn_n))
+                j_up_up_n = ti.max(0, ti.min(ny - 1, j_up_up_n))
+            
+            c_up_n = tracer[k, j_up_n, i]
+            c_dn_n = tracer[k, j_dn_n, i]
+            c_up_up_n = tracer[k, j_up_up_n, i]
+            
+            denom_n = c_dn_n - c_up_n
+            r_n = 0.0
+            if ti.abs(denom_n) > 1e-8:
+                r_n = (c_up_n - c_up_up_n) / denom_n
+                
+            cfl_n = ti.abs(v_n) * dt / dy[j, i]
+            
+            # EXPLICIT 1ST-ORDER UPWIND FALLBACK AT NORTHERN BOUNDARY
+            flux_n = 0.0
+            if is_global == 0 and (j <= 0 or j >= ny - 2):
+                flux_n = v_n * c_up_n
+            else:
+                flux_n = v_n * c_up_n + 0.5 * ti.abs(v_n) * (1.0 - cfl_n) * van_leer_limiter(r_n) * denom_n
+
+            term_y = (flux_n - flux_s) / dy[j, i]
+
+            # ==========================================
+            # Z-AXIS (Vertical) Conservative TVD Fluxes
+            # ==========================================
+            k_t = k - 1 
+            k_b = k + 1 
+            
+            w_t = 0.5 * (w[k_t, j, i] + w[k, j, i])
+            w_b = 0.5 * (w[k, j, i] + w[k_b, j, i]) if k < nz - 1 else w[k, j, i]
+            
+            # --- Top Face Flux ---
+            k_up_t = k_t + 1 if w_t > 0.0 else k_t - 1
+            k_dn_t = k_t - 1 if w_t > 0.0 else k_t + 1
+            k_up_up_t = k_t + 2 if w_t > 0.0 else k_t - 2
+            
+            k_up_t = ti.max(0, ti.min(nz - 1, k_up_t))
+            k_dn_t = ti.max(0, ti.min(nz - 1, k_dn_t))
+            k_up_up_t = ti.max(0, ti.min(nz - 1, k_up_up_t))
+            
+            c_up_t = tracer[k_up_t, j, i]
+            c_dn_t = tracer[k_dn_t, j, i]
+            c_up_up_t = tracer[k_up_up_t, j, i]
+            
+            denom_t = c_dn_t - c_up_t
+            r_t = 0.0
+            if ti.abs(denom_t) > 1e-8:
+                r_t = (c_up_t - c_up_up_t) / denom_t
+                
+            cfl_t = ti.abs(w_t) * dt / dz[k, j, i]
+            flux_t = w_t * c_up_t + 0.5 * ti.abs(w_t) * (1.0 - cfl_t) * minmod_limiter(r_t) * denom_t
+
+            # --- Bottom Face Flux ---
+            k_up_b = k_b + 1 if w_b > 0.0 else k_b - 1
+            k_dn_b = k_b - 1 if w_b > 0.0 else k_b + 1
+            k_up_up_b = k_b + 2 if w_b > 0.0 else k_b - 2
+            
+            k_up_b = ti.max(0, ti.min(nz - 1, k_up_b))
+            k_dn_b = ti.max(0, ti.min(nz - 1, k_dn_b))
+            k_up_up_b = ti.max(0, ti.min(nz - 1, k_up_up_b))
+            
+            c_up_b = tracer[k_up_b, j, i]
+            c_dn_b = tracer[k_dn_b, j, i]
+            c_up_up_b = tracer[k_up_up_b, j, i]
+            
+            denom_b = c_dn_b - c_up_b
+            r_b = 0.0
+            if ti.abs(denom_b) > 1e-8:
+                r_b = (c_up_b - c_up_up_b) / denom_b
+                
+            cfl_b = ti.abs(w_b) * dt / dz[k, j, i]
+            flux_b = w_b * c_up_b + 0.5 * ti.abs(w_b) * (1.0 - cfl_b) * minmod_limiter(r_b) * denom_b
+
+            # Net Divergence Z
+            # (Flux passing upward through top face minus flux passing upward through bottom face)
+            term_z = (flux_t - flux_b) / dz[k, j, i]  
+            
+            # ==========================================
+            # DIVERGENCE CORRECTION (Advective Form)
+            # ==========================================
+            # 1. Calculate the raw numerical volume divergence of the 3D cell
+            div_u = (u_e - u_w) / dx[j, i]
+            div_v = (v_n - v_s) / dy[j, i]
+            div_w = (w_t - w_b) / dz[k, j, i]
+            total_div = div_u + div_v + div_w
+            
+            # 2. Subtract the artificial concentration caused by water compression (- c * total_div)
+            tracer_new[k, j, i] = ti.max(0.0, c - dt * (term_x + term_y + term_z - c * total_div))
+            
 @ti.kernel
 def diffusion_implicit_vertical_ti(
     tracer: ti.template(), kz: ti.template(), dz: ti.template(),
@@ -324,69 +522,14 @@ def diffusion_implicit_vertical_ti(
                 for step in range(1, k_bot + 1):
                     k = k_bot - step
                     tracer[k, j, i] = dp[k, j, i] - cp[k, j, i] * tracer[k+1, j, i]
-
-@ti.kernel
-def advection_neumann_ti(
-    tracer: ti.template(), tracer_new: ti.template(),
-    u: ti.template(), v: ti.template(), w: ti.template(),
-    dz: ti.template(), dx: ti.template(), dy: ti.template(),
-    dt: ti.f32, is_global: ti.i32
-):
-    nz, ny, nx = tracer.shape
-    
-    # 1. Copy over boundary values natively
-    for k, j, i in tracer:
-        tracer_new[k, j, i] = tracer[k, j, i]
-
-    # 2. Compute advection exclusively for the inner domain
-    # ti.ndrange natively loops across the GPU.
-    for k, j, i in ti.ndrange(nz, (1, ny - 1), nx):
-        # Skip boundaries if regional
-        if is_global == 0 and (i == 0 or i == nx - 1):
-            continue
             
-        if dz[k, j, i] > 1e-6:
-            c = tracer[k, j, i]
-            
-            # Horizontal (Upwind)
-            i_up = i - 1 if u[k, j, i] > 0.0 else i + 1
-            j_up = j - 1 if v[k, j, i] > 0.0 else j + 1
-            
-            if is_global == 1:
-                if i_up < 0: i_up = nx - 1
-                elif i_up >= nx: i_up = 0
-                
-            c_up_x = tracer[k, j, i_up] if dz[k, j, i_up] > 1e-6 else c
-            c_up_y = tracer[k, j_up, i] if dz[k, j_up, i] > 1e-6 else c
-            
-            term_x = ti.abs(u[k, j, i]) * (c - c_up_x) / dx[j, i]
-            term_y = ti.abs(v[k, j, i]) * (c - c_up_y) / dy[j, i]
-            
-            # Vertical
-            # Guard against out-of-bounds k+1 access at the ocean floor
-            w_val = 0.0
-            if k < nz - 1:
-                w_val = 0.5 * (w[k, j, i] + w[k+1, j, i])
-            else:
-                w_val = 0.5 * w[k, j, i]
-                
-            c_below = tracer[k+1, j, i] if (k < nz - 1 and dz[k+1, j, i] > 1e-6) else c
-            c_above = tracer[k-1, j, i] if (k > 0 and dz[k-1, j, i] > 1e-6) else c
-            
-            # FIX: Pre-declare term_z outside the if-block so it survives!
-            term_z = 0.0
-            if w_val > 0.0:
-                term_z = w_val * (c - c_below) / dz[k, j, i]
-            else:
-                term_z = w_val * (c_above - c) / dz[k, j, i]
-                
-            tracer_new[k, j, i] = ti.max(0.0, c - dt * (term_x + term_y + term_z))
 @ti.kernel
 def calculate_w_rigid_lid_ti(
     u: ti.template(), v: ti.template(), dz: ti.template(),
     dx: ti.template(), dy: ti.template(), w: ti.template()
 ):
     nz, ny, nx = u.shape
+    
     # Clear W array
     for k, j, i in w:
         w[k, j, i] = 0.0
@@ -400,15 +543,20 @@ def calculate_w_rigid_lid_ti(
         if k_bottom > 0:
             w_accum = 0.0
             for k in range(k_bottom):
+                # STRICT WALL BLOCKING: 0.0 flux if neighbor is land
                 u_w = 0.5 * (u[k, j, i-1] + u[k, j, i]) if dz[k, j, i-1] > 1e-6 else 0.0
                 u_e = 0.5 * (u[k, j, i] + u[k, j, i+1]) if dz[k, j, i+1] > 1e-6 else 0.0
                 v_s = 0.5 * (v[k, j-1, i] + v[k, j, i]) if dz[k, j-1, i] > 1e-6 else 0.0
                 v_n = 0.5 * (v[k, j, i] + v[k, j+1, i]) if dz[k, j+1, i] > 1e-6 else 0.0
                 
+                # Calculate horizontal divergence
                 div_h = ((u_e - u_w) / dx[j, i]) + ((v_n - v_s) / dy[j, i])
+                
+                # Accumulate vertical velocity (integrating from surface down)
                 w_accum += div_h * dz[k, j, i]
                 w[k+1, j, i] = w_accum
                 
+            # Rigid lid correction: ensure W at the ocean floor is exactly 0.0
             bottom_error = w[k_bottom, j, i]
             for k in range(1, k_bottom + 1):
                 w[k, j, i] -= bottom_error * float(k) / float(k_bottom)
@@ -478,27 +626,6 @@ def calculate_full_kz_ti(
                     N2 = ti.max((9.81 / 1035.0) * (drho / dz_eff), 1e-7)
                 k_deep = 1e-11 / ti.sqrt(N2)
                 kz[k, j, i] = ti.min(ti.max(k_deep, local_bg), local_ceil)
-
-@ti.kernel
-def diffusion_robust_ti(tracer: ti.template(), kz: ti.template(), dz: ti.template(), dt: ti.f32):
-    nz, ny, nx = tracer.shape
-    for j, i in ti.ndrange(ny, nx):
-        if dz[0, j, i] > 1e-6:
-            for k in range(nz):
-                if dz[k, j, i] < 1e-6: continue
-                
-                flux_top, flux_bot = 0.0, 0.0
-                if k > 0:
-                    delta_z_top = 0.5 * (dz[k-1, j, i] + dz[k, j, i])
-                    k_eff_top = ti.min(0.5 * (kz[k-1, j, i] + kz[k, j, i]), 0.45 * (delta_z_top**2) / dt)
-                    flux_top = k_eff_top * (tracer[k, j, i] - tracer[k-1, j, i]) / delta_z_top if delta_z_top > 1e-6 else 0.0
-                
-                if k < nz - 1:
-                    delta_z_bot = 0.5 * (dz[k, j, i] + dz[k+1, j, i])
-                    k_eff_bot = ti.min(0.5 * (kz[k, j, i] + kz[k+1, j, i]), 0.45 * (delta_z_bot**2) / dt)
-                    flux_bot = k_eff_bot * (tracer[k+1, j, i] - tracer[k, j, i]) / delta_z_bot if delta_z_bot > 1e-6 else 0.0
-                
-                tracer[k, j, i] += dt * (flux_bot - flux_top) / dz[k, j, i]
 
 @ti.kernel
 def calc_o2_flux_ti(

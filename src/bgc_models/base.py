@@ -43,7 +43,7 @@ class BaseBGCModel(ABC):
                     self.tracers[name] = np.where(self.water_mask, 0.01, 0.0).astype(np.float32)
 
     @abstractmethod
-    def biology_step(self, t_curr, sw_curr, dz, dt):
+    def biology_step(self, t_curr, sw_curr, ice_curr, dz, dt):
         pass
 
     def sinking_step(self, dz, dt):

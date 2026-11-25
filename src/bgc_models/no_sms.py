@@ -7,6 +7,7 @@ from .base import BaseBGCModel
 @ti.kernel
 def biology_kernel_ti(
     nitrate: ti.types.ndarray(), 
+    oxygen: ti.types.ndarray(), 
     temp: ti.types.ndarray(), 
     par: ti.types.ndarray(), 
     dz: ti.types.ndarray(), 
@@ -29,7 +30,7 @@ class Model_NO_SMS(BaseBGCModel):
         super().__init__(nz, ny, nx, water_mask)
         
         # 1. Setup Tracers
-        self.names = ['nitrate']
+        self.names = ['nitrate', 'oxygen']
         self.tracers = {n: np.zeros((nz, ny, nx), dtype=np.float32) for n in self.names}
         
         # 2. Handle Parameters
@@ -38,7 +39,7 @@ class Model_NO_SMS(BaseBGCModel):
         else:
             self.params = params
 
-    def biology_step(self, t_curr, sw_curr, dz, dt):
+    def biology_step(self, t_curr, sw_curr, ice_curr, dz, dt):
         """Step biology forward."""
         
         # 1. Calc Shared PAR (Zeros since there is no phytoplankton shading)
@@ -47,6 +48,7 @@ class Model_NO_SMS(BaseBGCModel):
         # 2. Execute the Taichi biology kernel in-place
         biology_kernel_ti(
             self.tracers['nitrate'],
+            self.tracers['oxygen'],
             t_curr,
             par_3d,
             dz,

@@ -50,8 +50,7 @@ def download_input(cfg, run_name):
             list_3d = ["thetao_mean", "so_mean", "uo_mean", "vo_mean"]
             list_2d = ["siconc_mean"]
         else:
-            sys.exit(f"❌ ERROR: OCEAN_SOURCE: {cfg["OCEAN_SOURCE"
-                ]} is not supported. See config/README.md for the list of supported sources.")
+            sys.exit(f"❌ ERROR: OCEAN_SOURCE: {cfg['OCEAN_SOURCE']} is not supported. See config/README.md for the list of supported sources.")
      
         # Loop over the 3D variables
         for i in range(len(list_3d)):
